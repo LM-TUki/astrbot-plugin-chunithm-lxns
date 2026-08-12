@@ -1,0 +1,62 @@
+{
+  "lxns_token": {
+    "description": "落雪开发者 API 密钥",
+    "hint": "用于查询玩家信息、B30、Recent、单曲成绩等需要权限的接口。公共曲库查询不需要 Token。",
+    "type": "string",
+    "default": ""
+  },
+  "api_base": {
+    "description": "落雪 API 基础地址",
+    "hint": "通常保持默认值即可。",
+    "type": "string",
+    "default": "https://maimai.lxns.net/api/v0"
+  },
+  "asset_base": {
+    "description": "中二节奏资源基础地址",
+    "hint": "用于生成曲绘、角色、名牌等资源链接。",
+    "type": "string",
+    "default": "https://assets2.lxns.net/chunithm"
+  },
+  "default_version": {
+    "description": "默认游戏版本",
+    "hint": "调用曲库与收藏品公共接口时使用。落雪文档默认值为 23000。",
+    "type": "int",
+    "default": 23000
+  },
+  "cache_seconds": {
+    "description": "曲库缓存时间（秒）",
+    "hint": "曲库和别名会缓存到 data/plugin_data/astrbot_plugin_chunithm_lxns。",
+    "type": "int",
+    "default": 86400
+  },
+  "timeout_seconds": {
+    "description": "API 请求超时时间（秒）",
+    "hint": "网络较慢时可以适当调大。",
+    "type": "int",
+    "default": 15
+  },
+  "default_recent_count": {
+    "description": "Recent 默认展示数量",
+    "hint": "范围 1-50。",
+    "type": "int",
+    "default": 10
+  },
+  "b30_show_count": {
+    "description": "B30 展示数量",
+    "hint": "范围 1-30。",
+    "type": "int",
+    "default": 30
+  },
+  "selection_show_count": {
+    "description": "Selection 展示数量",
+    "hint": "范围 0-10，设置为 0 则不展示。",
+    "type": "int",
+    "default": 10
+  },
+  "auto_resolve_qq": {
+    "description": "自动用 QQ 号查询落雪绑定",
+    "hint": "开启后，未手动绑定时会尝试调用 /chunithm/player/qq/{qq}。",
+    "type": "bool",
+    "default": true
+  }
+}
