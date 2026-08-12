@@ -139,3 +139,8 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 ### 查询玩家成绩失败或返回无权限
 
 检查落雪开发者 Token 是否填写正确，以及申请权限是否包含第三方查询成绩相关接口。
+
+## 相关链接
+
+- AstrBot: https://github.com/AstrBotDevs/AstrBot
+- 落雪 LxBot: https://github.com/JoinChang/LxBot
