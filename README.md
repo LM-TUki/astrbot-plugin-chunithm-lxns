@@ -144,3 +144,4 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 
 - AstrBot: https://github.com/AstrBotDevs/AstrBot
 - 落雪 LxBot: https://github.com/JoinChang/LxBot
+- 落雪查分器（前端）：https://github.com/Lxns-Network/maimai-prober-frontend
