@@ -13,9 +13,21 @@
   },
   "asset_base": {
     "description": "中二节奏资源基础地址",
-    "hint": "用于生成曲绘、角色、名牌等资源链接。",
+    "hint": "仅在管理员主动执行素材更新时使用；B30 查询不会访问此地址。",
     "type": "string",
     "default": "https://assets2.lxns.net/chunithm"
+  },
+  "asset_sync_concurrency": {
+    "description": "素材更新并发数",
+    "hint": "仅影响管理员主动执行的公共素材更新，范围 1-4；日常查询不联网下载素材。",
+    "type": "int",
+    "default": 1
+  },
+  "asset_sync_delay": {
+    "description": "素材更新请求间隔（秒）",
+    "hint": "用于降低落雪素材站压力，建议保持默认值或适当增大。",
+    "type": "float",
+    "default": 0.5
   },
   "default_version": {
     "description": "默认游戏版本",

@@ -6,7 +6,7 @@
 
 - 绑定中二节奏好友码，后续查询可省略好友码。
 - 查询玩家资料：昵称、Rating、等级、OVER POWER、称号、角色、名牌、头像和同步时间；好友码与游玩次数默认隐藏。
-- 生成 Rating 构成图片：Best 30、Selection 10、New Best 20，使用落雪曲绘与玩家收藏品素材。
+- 生成 Rating 构成图片：Best 30、Selection 10、New Best 20，仅读取本地曲绘与玩家收藏品素材。
 - 歌曲卡片展示曲绘、分数、单曲 Rating、等级、详细定数、CLEAR/FULL COMBO/AJ/AJC 和评级。
 - EXPERT 使用红色卡片；ULTIMA 使用黑色主体、红色警示边，避免两种难度混淆。
 - 默认隐藏好友码与游玩次数，可由管理员分别开启。
@@ -15,8 +15,9 @@
 - 查询曲库详情：曲名、曲师、分类、BPM、版本、谱面等级、定数、物量、谱师等。
 - 查询歌曲别名。
 - 按等级和难度随机谱面。
-- 生成落雪曲绘资源链接。
+- 查询本地曲绘；缺失时提示管理员同步素材。
 - 本地缓存曲库和别名，支持手动刷新。
+- 管理员可独立、主动同步公共曲绘与角色素材；日常 B30 不访问素材站。
 
 ## 安装
 
@@ -50,7 +51,9 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 | --- | --- | --- |
 | `lxns_token` | 空 | 落雪开发者 API 密钥。查询玩家信息、B30、Recent、单曲成绩时需要。 |
 | `api_base` | `https://maimai.lxns.net/api/v0` | 落雪 API 基础地址，通常保持默认。 |
-| `asset_base` | `https://assets2.lxns.net/chunithm` | 曲绘等资源链接基础地址。 |
+| `asset_base` | `https://assets2.lxns.net/chunithm` | 仅由管理员主动执行素材更新时使用。 |
+| `asset_sync_concurrency` | `1` | 素材更新并发数，范围 1-4。默认单并发以降低素材站压力。 |
+| `asset_sync_delay` | `0.5` | 主动更新素材时每个任务的请求间隔，单位秒。 |
 | `default_version` | `23000` | 曲库接口使用的默认版本。 |
 | `cache_seconds` | `86400` | 曲库和别名本地缓存时间，单位秒。 |
 | `timeout_seconds` | `15` | API 请求超时时间，单位秒。 |
@@ -81,8 +84,12 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 | `/chu song <曲名/别名/ID>` | 查询曲库歌曲详情。 |
 | `/chu alias <曲名/ID>` | 查询歌曲别名。 |
 | `/chu random [等级] [难度]` | 随机一张符合条件的谱面。 |
-| `/chu jacket <曲名/ID>` | 获取曲绘链接。 |
+| `/chu jacket <曲名/ID>` | 发送已保存的本地曲绘。 |
 | `/chu update` | 强制刷新本地曲库和别名缓存。 |
+| `/chu assets status` | 查看本地曲绘、角色素材数量和同步进度。 |
+| `/chu assets update all` | 管理员后台同步全部公共曲绘和角色。 |
+| `/chu assets update jackets` | 管理员后台同步公共曲绘。 |
+| `/chu assets update characters` | 管理员后台同步公共角色素材。 |
 
 `/chu <曲名>` 会自动按 `/chu song <曲名>` 处理。
 
@@ -113,6 +120,8 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 /chu random 14+ mas
 /chu jacket 玩具狂奏曲
 /chu update
+/chu assets status
+/chu assets update all
 ```
 
 ## 查询说明
@@ -124,6 +133,7 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 - 曲库和别名会缓存到本地，默认 24 小时过期；需要立即更新时使用 `/chu update`。
 - B30 严格使用落雪 API 返回的 `bests`、`selections`、`new_bests` 分组，不在渲染时重新归类歌曲。
 - AJ、AJC、FULL COMBO、CLEAR 等标记只读取落雪成绩字段，不通过分数推断。
+- B30 生成过程中只读取 `assets/` 本地文件，不会按玩家成绩向素材站请求曲绘或角色。
 
 ## 数据文件
 
@@ -131,12 +141,17 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 
 - `bindings.json`：用户绑定的好友码。
 - `catalog_cache.json`：落雪曲库和别名缓存。
-- `assets/`：从落雪素材站下载的曲绘、角色、名牌、地图头像和图片称号缓存。
+- `assets/`：管理员主动同步的公共曲绘、角色等本地素材库；包含同步清单 `manifest.json`。
 - `generated/`：生成的 B30 图片，超过 24 小时会自动清理。
+
+`assets/` 与 `generated/` 都是运行期本地数据，已由 `.gitignore` 排除，不会提交到插件仓库。
 
 ## 素材说明
 
-- 曲绘、角色、名牌、地图头像和图片称号在运行时从落雪中二节奏素材站下载并缓存。
+- 日常查询不会从素材站下载图片。管理员需要先执行 `/chu assets update all` 建立本地曲绘和角色素材库。
+- 主动同步器只调用落雪公开曲库、公开角色列表和公共素材 CDN，不携带开发者 Token、好友码、玩家成绩或 Cookie，也不读取系统代理配置。
+- 为避免对落雪素材站造成压力，同步采用低并发、请求间隔和失败退避；后续更新会跳过已有有效文件。
+- 首次全量同步需要下载较多文件，可能持续较长时间；同步在后台进行，不阻塞日常查询。
 - 评级、CLEAR、FULL COMBO、AJ/AJC 和 CLASS 等固定 UI 素材来自 [Lxns-Network/maimai-prober-frontend](https://github.com/Lxns-Network/maimai-prober-frontend)。
 - 图片字体使用 Google Fonts 的 Noto Sans SC，按 SIL Open Font License 1.1 分发。
 - CHUNITHM 及相关游戏素材的著作权归原权利人所有；本插件仅用于非商业查询结果展示。
@@ -158,6 +173,10 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 ### 查询玩家成绩失败或返回无权限
 
 检查落雪开发者 Token 是否填写正确，以及申请权限是否包含第三方查询成绩相关接口。
+
+### B30 显示 NO JACKET 或没有角色头像
+
+先让 AstrBot 管理员执行 `/chu assets status` 检查本地素材库，再执行 `/chu assets update all`。更新在后台运行，可继续用 `/chu assets status` 查看进度。B30 不会自行联网补图。
 
 ## 相关链接
 

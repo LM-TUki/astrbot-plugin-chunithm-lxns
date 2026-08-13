@@ -16,10 +16,12 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
+from .asset_store import LocalAssetStore, PublicAssetSynchronizer
 from .renderer import ChunithmBestRenderer, enrich_scores_with_catalog
 
 
 PLUGIN_NAME = "astrbot_plugin_chunithm_lxns"
+PLUGIN_VERSION = "0.3.0"
 DATA_DIR = Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
 
 LEVEL_NAMES = {
@@ -210,7 +212,7 @@ def _parse_difficulty_token(token: str) -> int | None:
     return DIFFICULTY_ALIASES.get(cleaned)
 
 
-@register(PLUGIN_NAME, "Codex", "接入落雪 API 的中二节奏查询插件", "0.2.0", "")
+@register(PLUGIN_NAME, "Codex", "接入落雪 API 的中二节奏查询插件", PLUGIN_VERSION, "")
 class ChunithmLxnsPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
@@ -245,6 +247,11 @@ class ChunithmLxnsPlugin(Star):
         self.show_friend_code = _safe_bool(self.config.get("show_friend_code"), False)
         self.show_play_count = _safe_bool(self.config.get("show_play_count"), False)
         self.footer_bot_name = str(self.config.get("footer_bot_name", "EmuBot") or "EmuBot").strip()
+        self.asset_sync_concurrency = max(
+            min(_safe_int(self.config.get("asset_sync_concurrency"), 1), 4),
+            1,
+        )
+        self.asset_sync_delay = max(_safe_float(self.config.get("asset_sync_delay")) or 0.5, 0.05)
 
         self.bindings_file = DATA_DIR / "bindings.json"
         self.catalog_file = DATA_DIR / "catalog_cache.json"
@@ -254,10 +261,11 @@ class ChunithmLxnsPlugin(Star):
         self.bindings: dict[str, str] = {}
         self.catalog: dict[str, Any] | None = None
         self.catalog_lock = asyncio.Lock()
-        self.asset_locks: dict[str, asyncio.Lock] = {}
-        self.asset_download_semaphore = asyncio.Semaphore(8)
         self.render_semaphore = asyncio.Semaphore(2)
         self.session: aiohttp.ClientSession | None = None
+        self.asset_update_task: asyncio.Task[None] | None = None
+        self.asset_update_state: dict[str, Any] = {"status": "idle"}
+        self.asset_store = LocalAssetStore(self.asset_cache_dir)
         self.renderer = ChunithmBestRenderer(self.static_dir)
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -271,6 +279,10 @@ class ChunithmLxnsPlugin(Star):
         logger.info("中二节奏落雪查询插件已加载")
 
     async def terminate(self):
+        if self.asset_update_task and not self.asset_update_task.done():
+            self.asset_update_task.cancel()
+            await asyncio.gather(self.asset_update_task, return_exceptions=True)
+        self.asset_update_task = None
         if self.session and not self.session.closed:
             await self.session.close()
         self.session = None
@@ -324,6 +336,8 @@ class ChunithmLxnsPlugin(Star):
             return await self._cmd_jacket(args)
         if cmd_key in {"update", "更新", "刷新"}:
             return await self._cmd_update_cache()
+        if cmd_key in {"assets", "asset", "素材", "资源"}:
+            return await self._cmd_assets(event, args)
 
         # Convenience: `/chu <曲名>` behaves like `/chu song <曲名>`.
         return await self._cmd_song(rest)
@@ -350,10 +364,12 @@ class ChunithmLxnsPlugin(Star):
             "/chu song <曲名/别名/ID> 查歌\n"
             "/chu alias <曲名/ID> 查别名\n"
             "/chu random [等级] [难度] 随机谱面\n"
-            "/chu jacket <曲名/ID> 获取曲绘链接\n"
+            "/chu jacket <曲名/ID> 获取本地曲绘\n"
             "/chu update 刷新本地曲库缓存\n"
+            "/chu assets status 查看本地素材库\n"
+            "/chu assets update [all/jackets/characters] 后台更新公共素材（管理员）\n"
             "\n"
-            "说明：玩家成绩接口需要在插件配置中填写落雪开发者 API 密钥。"
+            "说明：B30 只读取本地素材；玩家成绩接口需要配置落雪开发者 API 密钥。"
         )
 
     async def _cmd_bind(self, event: AstrMessageEvent, args: str) -> str:
@@ -593,13 +609,19 @@ class ChunithmLxnsPlugin(Star):
         lines.append(self._format_difficulty_detail(diff))
         return "\n".join(lines)
 
-    async def _cmd_jacket(self, args: str) -> str:
+    async def _cmd_jacket(self, args: str) -> str | Path:
         query = args.strip()
         if not query:
             return "用法：/chu jacket <曲名/ID>"
         song = await self._resolve_one_song(query)
         song_id = song.get("id")
-        return f"{song.get('id')} - {song.get('title')}\n{self.asset_base}/jacket/{song_id}.png"
+        local_path = self.asset_store.find("jacket", song_id)
+        if local_path:
+            return local_path
+        return (
+            f"{song.get('id')} - {song.get('title')}\n"
+            "本地素材库中没有该曲绘。请联系管理员执行 /chu assets update jackets。"
+        )
 
     async def _cmd_update_cache(self) -> str:
         catalog = await self._get_catalog(force=True)
@@ -609,12 +631,118 @@ class ChunithmLxnsPlugin(Star):
             f"{len(catalog.get('aliases', []))} 条别名记录。"
         )
 
+    async def _cmd_assets(self, event: AstrMessageEvent, args: str) -> str:
+        action, target = _split_first(args)
+        action = action.lower() or "status"
+        if action in {"status", "状态", "info"}:
+            return self._format_asset_status()
+        if action not in {"update", "sync", "更新", "同步"}:
+            return "用法：/chu assets status 或 /chu assets update [all/jackets/characters]"
+        if not event.is_admin():
+            raise UserFacingError("只有 AstrBot 管理员可以更新公共素材库。")
+        if self.asset_update_task and not self.asset_update_task.done():
+            return "公共素材库正在后台更新。\n" + self._format_asset_status()
+
+        target = target.strip().lower() or "all"
+        targets = {
+            "all": ("jacket", "character"),
+            "全部": ("jacket", "character"),
+            "jackets": ("jacket",),
+            "jacket": ("jacket",),
+            "曲绘": ("jacket",),
+            "characters": ("character",),
+            "character": ("character",),
+            "角色": ("character",),
+        }
+        kinds = targets.get(target)
+        if kinds is None:
+            return "素材类型只支持 all、jackets 或 characters。"
+
+        self.asset_update_state = {
+            "status": "queued",
+            "kinds": list(kinds),
+            "total": 0,
+            "completed": 0,
+            "downloaded": 0,
+            "skipped": 0,
+            "failed": 0,
+        }
+        self.asset_update_task = asyncio.create_task(self._run_asset_update(kinds))
+        return (
+            "已在后台启动公共素材更新。B30 查询仍只读取当前本地素材，不会触发网络下载。\n"
+            "使用 /chu assets status 查看进度。"
+        )
+
+    async def _run_asset_update(self, kinds: tuple[str, ...]) -> None:
+        synchronizer = PublicAssetSynchronizer(
+            self.asset_store,
+            api_base=self.api_base,
+            asset_base=self.asset_base,
+            version=self.default_version,
+            timeout_seconds=max(self.timeout_seconds, 30),
+            concurrency=self.asset_sync_concurrency,
+            delay_seconds=self.asset_sync_delay,
+        )
+
+        def update_state(state: dict[str, Any]) -> None:
+            self.asset_update_state = state
+
+        try:
+            await synchronizer.sync(kinds, update_state)
+        except asyncio.CancelledError:
+            self.asset_update_state = {**self.asset_update_state, "status": "cancelled"}
+            raise
+        except Exception as exc:
+            logger.error(f"公共素材库更新失败：{exc}")
+            logger.error(traceback.format_exc())
+            self.asset_update_state = {
+                **self.asset_update_state,
+                "status": "failed",
+                "error": str(exc),
+            }
+
+    def _format_asset_status(self) -> str:
+        state = self.asset_update_state
+        if state.get("status") == "idle":
+            manifest = self.asset_store.load_manifest()
+            if manifest:
+                state = manifest
+        counts = self.asset_store.counts()
+        labels = {
+            "idle": "空闲",
+            "queued": "等待开始",
+            "discovering": "读取公共素材清单",
+            "downloading": "下载中",
+            "complete": "已完成",
+            "failed": "失败",
+            "cancelled": "已取消",
+        }
+        status = labels.get(str(state.get("status")), str(state.get("status") or "空闲"))
+        lines = [
+            "中二节奏本地素材库",
+            f"状态：{status}",
+            f"曲绘：{counts['jacket']} / 角色：{counts['character']}",
+        ]
+        total = _safe_int(state.get("total"), 0)
+        completed = _safe_int(state.get("completed"), 0)
+        if total:
+            lines.append(
+                f"进度：{completed}/{total}，新增 {state.get('downloaded', 0)}，"
+                f"已有 {state.get('skipped', 0)}，失败 {state.get('failed', 0)}"
+            )
+        if state.get("completed_at"):
+            lines.append(f"最近完成：{_format_time(state.get('completed_at'))}")
+        if state.get("error"):
+            lines.append(f"错误：{state.get('error')}")
+        lines.append("日常 B30 仅读取这些本地文件，不会请求素材站。")
+        return "\n".join(lines)
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
             timeout = aiohttp.ClientTimeout(total=self.timeout_seconds, connect=8)
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
-                headers={"User-Agent": f"{PLUGIN_NAME}/0.2.0 AstrBot"},
+                headers={"User-Agent": f"{PLUGIN_NAME}/{PLUGIN_VERSION} AstrBot"},
             )
         return self.session
 
@@ -709,8 +837,20 @@ class ChunithmLxnsPlugin(Star):
             for score in rows
             if score.get("id") is not None
         }
-        jacket_paths = await self._cache_jackets(song_ids)
-        player_assets = await self._cache_player_assets(player)
+        jacket_paths = self._local_jackets(song_ids)
+        player_assets = self._local_player_assets(player)
+        missing_jackets = len(song_ids) - len(jacket_paths)
+        if missing_jackets:
+            logger.warning(
+                f"B30 本地素材库缺少 {missing_jackets}/{len(song_ids)} 张曲绘；"
+                "请由管理员执行 /chu assets update jackets。"
+            )
+        character = player.get("character") or {}
+        if character.get("id") is not None and player_assets.get("character") is None:
+            logger.warning(
+                f"B30 本地素材库缺少角色 {character.get('id')}；"
+                "请由管理员执行 /chu assets update characters。"
+            )
 
         sections = [
             (
@@ -752,20 +892,10 @@ class ChunithmLxnsPlugin(Star):
                     raise ValueError(f"Rating 分组重复谱面：{key}（{seen[key]} / {title}）")
                 seen[key] = title
 
-    async def _cache_jackets(self, song_ids: set[int]) -> dict[int, Path]:
-        pairs = await asyncio.gather(
-            *(
-                self._cache_asset("jacket", song_id, required=False)
-                for song_id in sorted(song_id for song_id in song_ids if song_id >= 0)
-            ),
-        )
-        return {
-            song_id: path
-            for song_id, path in zip(sorted(song_id for song_id in song_ids if song_id >= 0), pairs)
-            if path is not None
-        }
+    def _local_jackets(self, song_ids: set[int]) -> dict[int, Path]:
+        return self.asset_store.find_many("jacket", sorted(song_id for song_id in song_ids if song_id >= 0))
 
-    async def _cache_player_assets(self, player: dict[str, Any]) -> dict[str, Path | None]:
+    def _local_player_assets(self, player: dict[str, Any]) -> dict[str, Path | None]:
         requests: dict[str, tuple[str, Any] | None] = {
             "character": self._collection_request(player.get("character"), "character"),
             "plate": self._collection_request(player.get("name_plate"), "plate"),
@@ -774,85 +904,16 @@ class ChunithmLxnsPlugin(Star):
             if str((player.get("trophy") or {}).get("color") or "").lower() == "image"
             else None,
         }
-        active = [(name, request) for name, request in requests.items() if request is not None]
-        downloaded = await asyncio.gather(
-            *(self._cache_asset(kind, asset_id, required=False) for _, (kind, asset_id) in active),
-        )
-        result: dict[str, Path | None] = {name: None for name in requests}
-        for (name, _), path in zip(active, downloaded):
-            result[name] = path
-        return result
+        return {
+            name: self.asset_store.find(*request) if request else None
+            for name, request in requests.items()
+        }
 
     @staticmethod
     def _collection_request(collection: Any, kind: str) -> tuple[str, Any] | None:
         if not isinstance(collection, dict) or collection.get("id") is None:
             return None
         return kind, collection.get("id")
-
-    async def _cache_asset(self, kind: str, asset_id: Any, *, required: bool) -> Path | None:
-        safe_id = str(asset_id).strip()
-        if not re.fullmatch(r"\d{1,12}", safe_id):
-            if required:
-                raise ValueError(f"无效的 {kind} 素材 ID：{asset_id}")
-            return None
-
-        directory = self.asset_cache_dir / kind
-        path = directory / f"{safe_id}.png"
-        if self._valid_cached_image(path):
-            return path
-
-        lock_key = f"{kind}:{safe_id}"
-        lock = self.asset_locks.setdefault(lock_key, asyncio.Lock())
-        async with lock:
-            if self._valid_cached_image(path):
-                return path
-            url = f"{self.asset_base}/{kind}/{safe_id}.png"
-            try:
-                session = await self._get_session()
-                async with self.asset_download_semaphore:
-                    async with session.get(url) as response:
-                        if response.status != 200:
-                            if required:
-                                raise UserFacingError(f"落雪素材下载失败：{kind}/{safe_id}（HTTP {response.status}）")
-                            return None
-                        content_type = str(response.headers.get("Content-Type") or "")
-                        data = await response.read()
-                        if not data or (content_type and not content_type.startswith("image/")):
-                            if required:
-                                raise UserFacingError(f"落雪素材返回内容无效：{kind}/{safe_id}")
-                            return None
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                if required:
-                    raise UserFacingError(f"落雪素材下载失败：{exc}") from exc
-                logger.warning(f"下载落雪素材失败 {kind}/{safe_id}：{exc}")
-                return None
-
-            directory.mkdir(parents=True, exist_ok=True)
-            tmp_path = path.with_suffix(".png.tmp")
-            try:
-                tmp_path.write_bytes(data)
-                if not self._valid_cached_image(tmp_path):
-                    tmp_path.unlink(missing_ok=True)
-                    if required:
-                        raise UserFacingError(f"落雪素材不是有效图片：{kind}/{safe_id}")
-                    return None
-                tmp_path.replace(path)
-                return path
-            finally:
-                tmp_path.unlink(missing_ok=True)
-
-    @staticmethod
-    def _valid_cached_image(path: Path) -> bool:
-        if not path.exists() or path.stat().st_size < 64:
-            return False
-        try:
-            from PIL import Image
-
-            with Image.open(path) as image:
-                image.verify()
-            return True
-        except Exception:
-            return False
 
     def _cleanup_generated_images(self, max_age_seconds: int = 24 * 60 * 60) -> None:
         if not self.generated_dir.exists():
@@ -1206,7 +1267,8 @@ class ChunithmLxnsPlugin(Star):
             lines.append(f"别名：{shown}")
             if len(aliases) > 12:
                 lines.append(f"还有 {len(aliases) - 12} 个别名，可用 /chu alias {song.get('id')} 查看。")
-        lines.append(f"曲绘：{self.asset_base}/jacket/{song.get('id')}.png")
+        jacket = self.asset_store.find("jacket", song.get("id"))
+        lines.append(f"曲绘：{'已保存到本地素材库' if jacket else '本地素材库中暂无'}")
         return "\n".join(lines)
 
     def _format_song_levels(self, song: dict[str, Any]) -> str:
