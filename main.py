@@ -4,14 +4,18 @@ import asyncio
 import json
 import random
 import re
+import socket
 import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import aiohttp
 
+import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
@@ -21,8 +25,12 @@ from .renderer import ChunithmBestRenderer, enrich_scores_with_catalog
 
 
 PLUGIN_NAME = "astrbot_plugin_chunithm_lxns"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 DATA_DIR = Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
+MAX_COMMAND_LENGTH = 512
+MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
+OFFICIAL_API_HOST = "maimai.lxns.net"
+OFFICIAL_ASSET_HOST = "assets2.lxns.net"
 
 LEVEL_NAMES = {
     0: "BASIC",
@@ -129,6 +137,12 @@ class LxnsApiError(UserFacingError):
         super().__init__(message)
 
 
+@dataclass(frozen=True)
+class BotResponse:
+    text: str = ""
+    image: Path | None = None
+
+
 def _safe_int(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -212,17 +226,58 @@ def _parse_difficulty_token(token: str) -> int | None:
     return DIFFICULTY_ALIASES.get(cleaned)
 
 
+def _validate_base_url(raw: Any, *, official_host: str, allow_custom: bool) -> str:
+    value = str(raw or "").strip().rstrip("/")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("服务地址必须是无账号、查询参数和片段的 HTTPS 地址。")
+    if not allow_custom and parsed.hostname.casefold() != official_host:
+        raise ValueError(f"服务地址只允许使用官方域名 {official_host}。")
+    return value
+
+
+def _safe_remote_message(value: Any, token: str = "") -> str:
+    message = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or "")).strip()[:300]
+    if token:
+        message = message.replace(token, "[REDACTED]")
+    message = re.sub(r"(?<!\d)\d{6,20}(?!\d)", "[REDACTED]", message)
+    return message or "远程服务请求失败"
+
+
+async def _read_limited_response(response: aiohttp.ClientResponse, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        total += len(chunk)
+        if total > limit:
+            raise LxnsApiError("落雪 API 响应过大，已拒绝处理。", response.status)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @register(PLUGIN_NAME, "Codex", "接入落雪 API 的中二节奏查询插件", PLUGIN_VERSION, "")
 class ChunithmLxnsPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
         self.config = config or {}
-        self.api_base = str(
+        self.allow_custom_endpoints = _safe_bool(self.config.get("allow_custom_endpoints"), False)
+        self.api_base = _validate_base_url(
             self.config.get("api_base", "https://maimai.lxns.net/api/v0"),
-        ).rstrip("/")
-        self.asset_base = str(
+            official_host=OFFICIAL_API_HOST,
+            allow_custom=self.allow_custom_endpoints,
+        )
+        self.asset_base = _validate_base_url(
             self.config.get("asset_base", "https://assets2.lxns.net/chunithm"),
-        ).rstrip("/")
+            official_host=OFFICIAL_ASSET_HOST,
+            allow_custom=self.allow_custom_endpoints,
+        )
         self.token = str(self.config.get("lxns_token", "") or "").strip()
         self.default_version = _safe_int(self.config.get("default_version"), 23000)
         self.cache_seconds = max(
@@ -242,7 +297,7 @@ class ChunithmLxnsPlugin(Star):
             min(_safe_int(self.config.get("selection_show_count"), 10), 10),
             0,
         )
-        self.auto_resolve_qq = _safe_bool(self.config.get("auto_resolve_qq"), True)
+        self.auto_resolve_qq = _safe_bool(self.config.get("auto_resolve_qq"), False)
         self.render_b30_image = _safe_bool(self.config.get("render_b30_image"), True)
         self.show_friend_code = _safe_bool(self.config.get("show_friend_code"), False)
         self.show_play_count = _safe_bool(self.config.get("show_play_count"), False)
@@ -287,10 +342,13 @@ class ChunithmLxnsPlugin(Star):
             await self.session.close()
         self.session = None
 
-    @filter.regex(r"^/?chu(?:\s|$)")
+    @filter.regex(r"^/[Cc][Hh][Uu](?:\s|$)")
     async def handle_chu(self, event: AstrMessageEvent):
         try:
-            result = await self._dispatch(event, event.get_message_str())
+            message = event.get_message_str().strip()
+            if len(message) > MAX_COMMAND_LENGTH:
+                raise UserFacingError(f"命令过长，最多允许 {MAX_COMMAND_LENGTH} 个字符。")
+            result = await self._dispatch(event, message)
         except UserFacingError as exc:
             result = f"中二节奏查询失败：{exc}"
         except Exception as exc:
@@ -298,12 +356,23 @@ class ChunithmLxnsPlugin(Star):
             logger.error(traceback.format_exc())
             result = "中二节奏查询失败：插件内部错误，详情请查看 AstrBot 日志。"
 
-        if isinstance(result, Path):
-            yield event.image_result(str(result)).stop_event()
+        chain = []
+        message_id = getattr(event.message_obj, "message_id", None)
+        if message_id is not None:
+            chain.append(Comp.Reply(id=message_id))
+        if isinstance(result, BotResponse):
+            if result.text:
+                chain.append(Comp.Plain(result.text))
+            if result.image:
+                chain.append(Comp.Image.fromFileSystem(str(result.image)))
+        elif isinstance(result, Path):
+            chain.append(Comp.Image.fromFileSystem(str(result)))
         elif result:
-            yield event.plain_result(result).stop_event()
+            chain.append(Comp.Plain(str(result)))
+        if chain:
+            yield event.chain_result(chain).stop_event()
 
-    async def _dispatch(self, event: AstrMessageEvent, message: str) -> str | Path:
+    async def _dispatch(self, event: AstrMessageEvent, message: str) -> str | Path | BotResponse:
         rest = self._strip_prefix(message)
         cmd, args = _split_first(rest)
         cmd_key = cmd.strip().lower()
@@ -343,8 +412,10 @@ class ChunithmLxnsPlugin(Star):
         return await self._cmd_song(rest)
 
     def _strip_prefix(self, message: str) -> str:
-        match = re.match(r"^/?chu(?:\s+|$)(.*)$", message.strip(), flags=re.I | re.S)
-        return match.group(1).strip() if match else message.strip()
+        match = re.fullmatch(r"/chu(?:\s+(.*))?", message.strip(), flags=re.I | re.S)
+        if not match:
+            raise UserFacingError("命令必须以 /chu 开头。")
+        return str(match.group(1) or "").strip()
 
     def _help_text(self) -> str:
         return (
@@ -367,7 +438,7 @@ class ChunithmLxnsPlugin(Star):
             "/chu jacket <曲名/ID> 获取本地曲绘\n"
             "/chu update 刷新本地曲库缓存\n"
             "/chu assets status 查看本地素材库\n"
-            "/chu assets update [all/jackets/characters] 后台更新公共素材（管理员）\n"
+            "/chu assets update [all/jackets/collections] 后台更新公共素材（管理员）\n"
             "\n"
             "说明：B30 只读取本地素材；玩家成绩接口需要配置落雪开发者 API 密钥。"
         )
@@ -521,7 +592,7 @@ class ChunithmLxnsPlugin(Star):
             lines.append("暂无 Recent 数据。")
         return "\n".join(lines)
 
-    async def _cmd_score(self, event: AstrMessageEvent, args: str) -> str:
+    async def _cmd_score(self, event: AstrMessageEvent, args: str) -> str | BotResponse:
         query, level_index, explicit_code = self._parse_score_args(args)
         if not query:
             return "用法：/chu score <曲名或ID> [难度] [好友码]"
@@ -536,7 +607,7 @@ class ChunithmLxnsPlugin(Star):
                 f"{self._song_display_name(song, query)} 单曲最佳",
                 self._format_score_line(score),
             ]
-            return "\n".join(lines)
+            return BotResponse(text="\n".join(lines), image=self._song_jacket(song))
 
         scores = await self._api_song_scores(code, params)
         if isinstance(scores, dict):
@@ -546,9 +617,9 @@ class ChunithmLxnsPlugin(Star):
             lines.append(self._format_score_line(score, idx=idx))
         if len(lines) == 1:
             lines.append("没有查到这首歌的缓存成绩。")
-        return "\n".join(lines)
+        return BotResponse(text="\n".join(lines), image=self._song_jacket(song))
 
-    async def _cmd_song(self, args: str) -> str:
+    async def _cmd_song(self, args: str) -> str | BotResponse:
         query = args.strip()
         if not query:
             return "用法：/chu song <曲名/别名/ID>"
@@ -556,8 +627,12 @@ class ChunithmLxnsPlugin(Star):
         if not songs:
             return f"没有找到曲目：{query}"
         if len(songs) == 1:
-            aliases = await self._aliases_for_song(songs[0].get("id"))
-            return self._format_song_detail(songs[0], aliases)
+            song = songs[0]
+            aliases = await self._aliases_for_song(song.get("id"))
+            return BotResponse(
+                text=self._format_song_detail(song, aliases),
+                image=self._song_jacket(song),
+            )
 
         lines = [f"找到 {len(songs)} 个可能的曲目："]
         for song in songs:
@@ -565,7 +640,7 @@ class ChunithmLxnsPlugin(Star):
         lines.append("请使用 /chu song <ID> 查看详情。")
         return "\n".join(lines)
 
-    async def _cmd_alias(self, args: str) -> str:
+    async def _cmd_alias(self, args: str) -> str | BotResponse:
         query = args.strip()
         if not query:
             return "用法：/chu alias <曲名/ID>"
@@ -578,9 +653,9 @@ class ChunithmLxnsPlugin(Star):
                 lines.append(f"... 还有 {len(aliases) - 40} 个")
         else:
             lines.append("暂无别名。")
-        return "\n".join(lines)
+        return BotResponse(text="\n".join(lines), image=self._song_jacket(song))
 
-    async def _cmd_random(self, args: str) -> str:
+    async def _cmd_random(self, args: str) -> str | BotResponse:
         level_filter = None
         difficulty_filter = None
         for token in args.split():
@@ -607,7 +682,11 @@ class ChunithmLxnsPlugin(Star):
         lines = ["随机中二节奏谱面"]
         lines.append(self._format_song_brief(song))
         lines.append(self._format_difficulty_detail(diff))
-        return "\n".join(lines)
+        jacket_id = diff.get("origin_id") if diff.get("difficulty") == 5 else song.get("id")
+        jacket = self.asset_store.find("jacket", jacket_id) or self._song_jacket(song)
+        if jacket is None:
+            lines.append("本地素材库中暂无曲绘，请联系管理员更新公共素材。")
+        return BotResponse(text="\n".join(lines), image=jacket)
 
     async def _cmd_jacket(self, args: str) -> str | Path:
         query = args.strip()
@@ -615,7 +694,7 @@ class ChunithmLxnsPlugin(Star):
             return "用法：/chu jacket <曲名/ID>"
         song = await self._resolve_one_song(query)
         song_id = song.get("id")
-        local_path = self.asset_store.find("jacket", song_id)
+        local_path = self._song_jacket(song)
         if local_path:
             return local_path
         return (
@@ -637,7 +716,7 @@ class ChunithmLxnsPlugin(Star):
         if action in {"status", "状态", "info"}:
             return self._format_asset_status()
         if action not in {"update", "sync", "更新", "同步"}:
-            return "用法：/chu assets status 或 /chu assets update [all/jackets/characters]"
+            return "用法：/chu assets status 或 /chu assets update [all/jackets/collections]"
         if not event.is_admin():
             raise UserFacingError("只有 AstrBot 管理员可以更新公共素材库。")
         if self.asset_update_task and not self.asset_update_task.done():
@@ -645,18 +724,30 @@ class ChunithmLxnsPlugin(Star):
 
         target = target.strip().lower() or "all"
         targets = {
-            "all": ("jacket", "character"),
-            "全部": ("jacket", "character"),
+            "all": ("jacket", "character", "plate", "icon", "trophy"),
+            "全部": ("jacket", "character", "plate", "icon", "trophy"),
             "jackets": ("jacket",),
             "jacket": ("jacket",),
             "曲绘": ("jacket",),
             "characters": ("character",),
             "character": ("character",),
             "角色": ("character",),
+            "collections": ("character", "plate", "icon", "trophy"),
+            "collection": ("character", "plate", "icon", "trophy"),
+            "收藏品": ("character", "plate", "icon", "trophy"),
+            "plates": ("plate",),
+            "plate": ("plate",),
+            "名牌": ("plate",),
+            "icons": ("icon",),
+            "icon": ("icon",),
+            "头像": ("icon",),
+            "trophies": ("trophy",),
+            "trophy": ("trophy",),
+            "称号": ("trophy",),
         }
         kinds = targets.get(target)
         if kinds is None:
-            return "素材类型只支持 all、jackets 或 characters。"
+            return "素材类型支持 all、jackets、collections、characters、plates、icons 或 trophies。"
 
         self.asset_update_state = {
             "status": "queued",
@@ -714,6 +805,7 @@ class ChunithmLxnsPlugin(Star):
             "discovering": "读取公共素材清单",
             "downloading": "下载中",
             "complete": "已完成",
+            "partial": "已完成（部分资源失败，可再次更新）",
             "failed": "失败",
             "cancelled": "已取消",
         }
@@ -721,7 +813,8 @@ class ChunithmLxnsPlugin(Star):
         lines = [
             "中二节奏本地素材库",
             f"状态：{status}",
-            f"曲绘：{counts['jacket']} / 角色：{counts['character']}",
+            f"曲绘：{counts['jacket']} / 角色：{counts['character']} / 名牌：{counts['plate']}",
+            f"地图头像：{counts['icon']} / 图片称号：{counts['trophy']}",
         ]
         total = _safe_int(state.get("total"), 0)
         completed = _safe_int(state.get("completed"), 0)
@@ -742,6 +835,9 @@ class ChunithmLxnsPlugin(Star):
             timeout = aiohttp.ClientTimeout(total=self.timeout_seconds, connect=8)
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
+                connector=aiohttp.TCPConnector(family=socket.AF_INET, limit=16, ttl_dns_cache=300),
+                trust_env=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
                 headers={"User-Agent": f"{PLUGIN_NAME}/{PLUGIN_VERSION} AstrBot"},
             )
         return self.session
@@ -767,8 +863,20 @@ class ChunithmLxnsPlugin(Star):
         url = f"{self.api_base}/{path.lstrip('/')}"
 
         try:
-            async with session.request(method, url, params=params, headers=headers) as resp:
-                text = await resp.text()
+            async with session.request(
+                method,
+                url,
+                params=params,
+                headers=headers,
+                allow_redirects=not auth,
+                max_line_size=8190,
+                max_field_size=8190,
+            ) as resp:
+                content_length = _safe_int(resp.headers.get("Content-Length"), 0)
+                if content_length > MAX_API_RESPONSE_BYTES:
+                    raise LxnsApiError("落雪 API 响应过大，已拒绝处理。", resp.status)
+                body = await _read_limited_response(resp, MAX_API_RESPONSE_BYTES)
+                text = body.decode(resp.charset or "utf-8", errors="replace")
                 try:
                     payload = json.loads(text) if text else {}
                 except json.JSONDecodeError as exc:
@@ -776,15 +884,15 @@ class ChunithmLxnsPlugin(Star):
 
                 if isinstance(payload, dict) and "success" in payload:
                     if not payload.get("success") or resp.status >= 400:
-                        message = payload.get("message") or f"HTTP {resp.status}"
-                        raise LxnsApiError(str(message), resp.status)
+                        message = _safe_remote_message(payload.get("message") or f"HTTP {resp.status}", self.token)
+                        raise LxnsApiError(message, resp.status)
                     return payload.get("data")
 
                 if resp.status >= 400:
                     raise LxnsApiError(f"HTTP {resp.status}", resp.status)
                 return payload
         except aiohttp.ClientError as exc:
-            raise UserFacingError(f"无法连接落雪 API：{exc}") from exc
+            raise UserFacingError("无法连接落雪 API，请稍后再试。") from exc
         except asyncio.TimeoutError as exc:
             raise UserFacingError("连接落雪 API 超时，请稍后再试。") from exc
 
@@ -894,6 +1002,19 @@ class ChunithmLxnsPlugin(Star):
 
     def _local_jackets(self, song_ids: set[int]) -> dict[int, Path]:
         return self.asset_store.find_many("jacket", sorted(song_id for song_id in song_ids if song_id >= 0))
+
+    def _song_jacket(self, song: dict[str, Any]) -> Path | None:
+        candidate_ids = [song.get("id")]
+        candidate_ids.extend(
+            difficulty.get("origin_id")
+            for difficulty in song.get("difficulties") or []
+            if difficulty.get("difficulty") == 5
+        )
+        for asset_id in candidate_ids:
+            jacket = self.asset_store.find("jacket", asset_id)
+            if jacket is not None:
+                return jacket
+        return None
 
     def _local_player_assets(self, player: dict[str, Any]) -> dict[str, Path | None]:
         requests: dict[str, tuple[str, Any] | None] = {
@@ -1130,6 +1251,10 @@ class ChunithmLxnsPlugin(Star):
         with tmp_path.open("w", encoding="utf-8") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
         tmp_path.replace(path)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
 
     def _format_player(self, player: dict[str, Any]) -> str:
         lines = [
@@ -1267,7 +1392,7 @@ class ChunithmLxnsPlugin(Star):
             lines.append(f"别名：{shown}")
             if len(aliases) > 12:
                 lines.append(f"还有 {len(aliases) - 12} 个别名，可用 /chu alias {song.get('id')} 查看。")
-        jacket = self.asset_store.find("jacket", song.get("id"))
+        jacket = self._song_jacket(song)
         lines.append(f"曲绘：{'已保存到本地素材库' if jacket else '本地素材库中暂无'}")
         return "\n".join(lines)
 

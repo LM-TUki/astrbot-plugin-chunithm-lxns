@@ -1,6 +1,6 @@
 name: astrbot_plugin_chunithm_lxns
 display_name: 中二节奏落雪查询
 desc: 接入落雪 API 的中二节奏查询插件，支持绑定、B30、Recent、单曲成绩、查歌、别名和随机谱面。
-version: v0.3.0
+version: v0.4.0
 author: Codex
 repo: "https://github.com/LM-TUki/astrbot-plugin-chunithm-lxns"

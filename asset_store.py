@@ -16,7 +16,28 @@ if TYPE_CHECKING:
 
 
 ASSET_KINDS = ("jacket", "character", "plate", "icon", "trophy")
-SYNC_KINDS = ("jacket", "character")
+SYNC_KINDS = ASSET_KINDS
+COLLECTION_KEYS = {
+    "character": "characters",
+    "plate": "plates",
+    "icon": "icons",
+    "trophy": "trophies",
+}
+MAX_IMAGE_BYTES = 16 * 1024 * 1024
+MAX_IMAGE_DIMENSION = 8192
+MAX_IMAGE_PIXELS = 40_000_000
+MAX_CATALOG_BYTES = 8 * 1024 * 1024
+
+
+async def _read_limited(response: Any, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        total += len(chunk)
+        if total > limit:
+            raise ValueError("Remote response exceeds the configured size limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class LocalAssetStore:
@@ -68,7 +89,14 @@ class LocalAssetStore:
         directory = self.root / kind
         if not directory.exists():
             return 0
-        return sum(1 for path in directory.glob("*.png") if self.valid_image(path))
+        count = 0
+        for path in directory.glob("*.png"):
+            try:
+                if path.is_file() and 64 <= path.stat().st_size <= MAX_IMAGE_BYTES:
+                    count += 1
+            except OSError:
+                continue
+        return count
 
     def counts(self) -> dict[str, int]:
         return {kind: self.count(kind) for kind in ASSET_KINDS}
@@ -77,7 +105,7 @@ class LocalAssetStore:
         if not self.manifest_path.exists():
             return {}
         try:
-            with self.manifest_path.open("r", encoding="utf-8") as handle:
+            with self.manifest_path.open("r", encoding="utf-8-sig") as handle:
                 payload = json.load(handle)
             return payload if isinstance(payload, dict) else {}
         except (OSError, json.JSONDecodeError):
@@ -91,25 +119,39 @@ class LocalAssetStore:
 
     @staticmethod
     def valid_image(path: Path) -> bool:
-        if not path.exists() or path.stat().st_size < 64:
+        if not path.exists() or not path.is_file() or not 64 <= path.stat().st_size <= MAX_IMAGE_BYTES:
             return False
         try:
             with Image.open(path) as image:
+                if not LocalAssetStore._valid_dimensions(image):
+                    return False
                 image.verify()
             return True
-        except (OSError, ValueError):
+        except (OSError, ValueError, Image.DecompressionBombError):
             return False
 
     @staticmethod
     def valid_image_bytes(data: bytes) -> bool:
-        if len(data) < 64:
+        if not 64 <= len(data) <= MAX_IMAGE_BYTES:
             return False
         try:
             with Image.open(io.BytesIO(data)) as image:
+                if not LocalAssetStore._valid_dimensions(image):
+                    return False
                 image.verify()
             return True
-        except (OSError, ValueError):
+        except (OSError, ValueError, Image.DecompressionBombError):
             return False
+
+    @staticmethod
+    def _valid_dimensions(image: Image.Image) -> bool:
+        width, height = image.size
+        return (
+            image.format == "PNG"
+            and 0 < width <= MAX_IMAGE_DIMENSION
+            and 0 < height <= MAX_IMAGE_DIMENSION
+            and width * height <= MAX_IMAGE_PIXELS
+        )
 
 
 class PublicAssetSynchronizer:
@@ -205,7 +247,7 @@ class PublicAssetSynchronizer:
 
             await asyncio.gather(*(worker() for _ in range(self.concurrency)))
 
-        state["status"] = "complete"
+        state["status"] = "partial" if state["failed"] else "complete"
         state["completed_at"] = datetime.now(timezone.utc).isoformat()
         state["counts"] = self.store.counts()
         self.store.save_manifest(state)
@@ -224,22 +266,26 @@ class PublicAssetSynchronizer:
                 "chunithm/song/list",
                 params={"version": self.version, "notes": "false"},
             )
-            plan.extend(
-                ("jacket", int(song["id"]))
-                for song in payload.get("songs", [])
-                if self.store.normalize_id(song.get("id")) is not None
-            )
-        if "character" in kinds:
+            for song in payload.get("songs", []):
+                if self.store.normalize_id(song.get("id")) is not None:
+                    plan.append(("jacket", int(song["id"])))
+                for difficulty in song.get("difficulties") or []:
+                    origin_id = difficulty.get("origin_id")
+                    if difficulty.get("difficulty") == 5 and self.store.normalize_id(origin_id) is not None:
+                        plan.append(("jacket", int(origin_id)))
+        for kind in kinds:
+            if kind not in COLLECTION_KEYS:
+                continue
             payload = await self._public_json(
                 session,
-                "chunithm/character/list",
+                f"chunithm/{kind}/list",
                 params={"version": self.version},
             )
-            plan.extend(
-                ("character", int(character["id"]))
-                for character in payload.get("characters", [])
-                if self.store.normalize_id(character.get("id")) is not None
-            )
+            for collection in payload.get(COLLECTION_KEYS[kind], []):
+                if kind == "trophy" and str(collection.get("color") or "").casefold() != "image":
+                    continue
+                if self.store.normalize_id(collection.get("id")) is not None:
+                    plan.append((kind, int(collection["id"])))
         return list(dict.fromkeys(plan))
 
     async def _public_json(
@@ -250,9 +296,13 @@ class PublicAssetSynchronizer:
         params: dict[str, Any],
     ) -> dict[str, Any]:
         url = f"{self.api_base}/{path.lstrip('/')}"
-        async with session.get(url, params=params) as response:
+        async with session.get(url, params=params, allow_redirects=False) as response:
             response.raise_for_status()
-            payload = await response.json(content_type=None)
+            content_length = int(response.headers.get("Content-Length") or 0)
+            if content_length > MAX_CATALOG_BYTES:
+                raise RuntimeError("Public LXNS catalog response is too large")
+            body = await _read_limited(response, MAX_CATALOG_BYTES)
+            payload = json.loads(body)
         if isinstance(payload, dict) and "success" in payload:
             if not payload.get("success"):
                 raise RuntimeError(str(payload.get("message") or "Public LXNS API request failed"))
@@ -272,9 +322,15 @@ class PublicAssetSynchronizer:
         url = f"{self.asset_base}/{kind}/{asset_id}.png"
         for attempt in range(3):
             try:
-                async with session.get(url) as response:
+                async with session.get(url, allow_redirects=False) as response:
                     if response.status == 200:
-                        data = await response.read()
+                        content_length = int(response.headers.get("Content-Length") or 0)
+                        if content_length > MAX_IMAGE_BYTES:
+                            return False
+                        try:
+                            data = await _read_limited(response, MAX_IMAGE_BYTES)
+                        except ValueError:
+                            return False
                         self.store.save(kind, asset_id, data)
                         return True
                     if response.status == 404:

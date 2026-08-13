@@ -17,6 +17,12 @@
     "type": "string",
     "default": "https://assets2.lxns.net/chunithm"
   },
+  "allow_custom_endpoints": {
+    "description": "允许自定义服务地址",
+    "hint": "安全选项，默认关闭。开启后开发者 Token 和查询参数可能发送到自定义地址，请仅在完全信任目标服务器时使用。",
+    "type": "bool",
+    "default": false
+  },
   "asset_sync_concurrency": {
     "description": "素材更新并发数",
     "hint": "仅影响管理员主动执行的公共素材更新，范围 1-4；日常查询不联网下载素材。",
@@ -91,8 +97,8 @@
   },
   "auto_resolve_qq": {
     "description": "自动用 QQ 号查询落雪绑定",
-    "hint": "开启后，未手动绑定时会尝试调用 /chunithm/player/qq/{qq}。",
+    "hint": "隐私选项，默认关闭。开启后，未手动绑定时会将消息发送者 QQ 号提交给落雪查询绑定。",
     "type": "bool",
-    "default": true
+    "default": false
   }
 }

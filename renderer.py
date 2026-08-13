@@ -130,6 +130,11 @@ def _contain(image: Image.Image, size: tuple[int, int]) -> Image.Image:
     return target
 
 
+def _open_rgba(path: Path) -> Image.Image:
+    with Image.open(path) as source:
+        return source.convert("RGBA").copy()
+
+
 def _remove_edge_white(image: Image.Image, tolerance: int = 18) -> Image.Image:
     image = image.convert("RGBA")
     pixels = image.load()
@@ -334,7 +339,7 @@ class ChunithmBestRenderer:
         panel = (MARGIN, 28, 1010, 278)
         plate_path = asset_paths.get("plate")
         if plate_path and plate_path.exists():
-            plate = _cover(Image.open(plate_path), (panel[2] - panel[0], panel[3] - panel[1]))
+            plate = _cover(_open_rgba(plate_path), (panel[2] - panel[0], panel[3] - panel[1]))
             plate = ImageEnhance.Brightness(plate).enhance(1.08)
             canvas.paste(plate, (panel[0], panel[1]), _rounded_mask((panel[2] - panel[0], panel[3] - panel[1]), 8))
             draw.rounded_rectangle(panel, radius=8, fill=(255, 255, 255, 118), outline=(111, 199, 217, 230), width=3)
@@ -345,7 +350,7 @@ class ChunithmBestRenderer:
         trophy_color = str(trophy.get("color") or "normal").lower()
         trophy_image = asset_paths.get("trophy")
         if trophy_color == "image" and trophy_image and trophy_image.exists():
-            banner = _contain(Image.open(trophy_image), (706, 48))
+            banner = _contain(_open_rgba(trophy_image), (706, 48))
             canvas.alpha_composite(banner, (51, 43))
         else:
             fill, text_color = TROPHY_COLORS.get(trophy_color, TROPHY_COLORS["normal"])
@@ -390,7 +395,7 @@ class ChunithmBestRenderer:
 
         avatar_path = asset_paths.get("icon") or asset_paths.get("character")
         if avatar_path and avatar_path.exists():
-            avatar = _cover(Image.open(avatar_path), (150, 150))
+            avatar = _cover(_open_rgba(avatar_path), (150, 150))
             canvas.paste(avatar, (805, 88), _rounded_mask((150, 150), 6))
         else:
             draw.rounded_rectangle((805, 88, 955, 238), radius=6, fill=(226, 233, 240, 255))
@@ -456,7 +461,7 @@ class ChunithmBestRenderer:
 
         jacket_path = score.get("jacket_path")
         if jacket_path and Path(jacket_path).exists():
-            jacket = _cover(Image.open(jacket_path), (102, 102))
+            jacket = _cover(_open_rgba(Path(jacket_path)), (102, 102))
         else:
             jacket = Image.new("RGBA", (102, 102), (*dark, 255))
             placeholder_draw = ImageDraw.Draw(jacket)
