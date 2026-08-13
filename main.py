@@ -8,12 +8,15 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import aiohttp
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
+
+from .renderer import ChunithmBestRenderer, enrich_scores_with_catalog
 
 
 PLUGIN_NAME = "astrbot_plugin_chunithm_lxns"
@@ -93,6 +96,8 @@ RANK_NAMES = {
 
 CLEAR_NAMES = {
     "catastrophy": "CATASTROPHY",
+    "absolutepp": "ABSOLUTE++",
+    "absolutep": "ABSOLUTE+",
     "absolute": "ABSOLUTE",
     "brave": "BRAVE",
     "hard": "HARD",
@@ -205,7 +210,7 @@ def _parse_difficulty_token(token: str) -> int | None:
     return DIFFICULTY_ALIASES.get(cleaned)
 
 
-@register(PLUGIN_NAME, "Codex", "接入落雪 API 的中二节奏查询插件", "0.1.0", "")
+@register(PLUGIN_NAME, "Codex", "接入落雪 API 的中二节奏查询插件", "0.2.0", "")
 class ChunithmLxnsPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
@@ -236,17 +241,31 @@ class ChunithmLxnsPlugin(Star):
             0,
         )
         self.auto_resolve_qq = _safe_bool(self.config.get("auto_resolve_qq"), True)
+        self.render_b30_image = _safe_bool(self.config.get("render_b30_image"), True)
+        self.show_friend_code = _safe_bool(self.config.get("show_friend_code"), False)
+        self.show_play_count = _safe_bool(self.config.get("show_play_count"), False)
+        self.footer_bot_name = str(self.config.get("footer_bot_name", "EmuBot") or "EmuBot").strip()
 
         self.bindings_file = DATA_DIR / "bindings.json"
         self.catalog_file = DATA_DIR / "catalog_cache.json"
+        self.asset_cache_dir = DATA_DIR / "assets"
+        self.generated_dir = DATA_DIR / "generated"
+        self.static_dir = Path(__file__).resolve().parent / "static"
         self.bindings: dict[str, str] = {}
         self.catalog: dict[str, Any] | None = None
         self.catalog_lock = asyncio.Lock()
+        self.asset_locks: dict[str, asyncio.Lock] = {}
+        self.asset_download_semaphore = asyncio.Semaphore(8)
+        self.render_semaphore = asyncio.Semaphore(2)
         self.session: aiohttp.ClientSession | None = None
+        self.renderer = ChunithmBestRenderer(self.static_dir)
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self.asset_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.generated_dir.mkdir(parents=True, exist_ok=True)
         self._load_bindings()
         self._load_catalog_from_disk()
+        self._cleanup_generated_images()
 
     async def initialize(self):
         logger.info("中二节奏落雪查询插件已加载")
@@ -267,10 +286,12 @@ class ChunithmLxnsPlugin(Star):
             logger.error(traceback.format_exc())
             result = "中二节奏查询失败：插件内部错误，详情请查看 AstrBot 日志。"
 
-        if result:
+        if isinstance(result, Path):
+            yield event.image_result(str(result)).stop_event()
+        elif result:
             yield event.plain_result(result).stop_event()
 
-    async def _dispatch(self, event: AstrMessageEvent, message: str) -> str:
+    async def _dispatch(self, event: AstrMessageEvent, message: str) -> str | Path:
         rest = self._strip_prefix(message)
         cmd, args = _split_first(rest)
         cmd_key = cmd.strip().lower()
@@ -354,7 +375,9 @@ class ChunithmLxnsPlugin(Star):
         self._save_bindings()
 
         suffix = f"（{player_name}）" if player_name else ""
-        return f"已绑定中二节奏好友码：{code}{suffix}"
+        if self.show_friend_code:
+            return f"已绑定中二节奏好友码：{code}{suffix}"
+        return f"已绑定中二节奏账号{suffix}。"
 
     def _cmd_unbind(self, event: AstrMessageEvent) -> str:
         key = self._binding_key(event)
@@ -362,7 +385,9 @@ class ChunithmLxnsPlugin(Star):
             return "当前账号没有绑定中二节奏好友码。"
         old_code = self.bindings.pop(key)
         self._save_bindings()
-        return f"已解绑中二节奏好友码：{old_code}"
+        if self.show_friend_code:
+            return f"已解绑中二节奏好友码：{old_code}"
+        return "已解绑中二节奏账号。"
 
     async def _cmd_player(self, event: AstrMessageEvent, args: str) -> str:
         code = None
@@ -381,20 +406,50 @@ class ChunithmLxnsPlugin(Star):
 
         return self._format_player(player)
 
-    async def _cmd_b30(self, event: AstrMessageEvent, args: str) -> str:
+    async def _cmd_b30(self, event: AstrMessageEvent, args: str) -> str | Path:
         explicit_code, rest = self._pop_friend_code(args)
         if rest:
             raise UserFacingError("B30 只接受好友码参数。用法：/chu b30 [好友码]")
         code = await self._resolve_friend_code(event, explicit_code)
 
         player_task = asyncio.create_task(self._api_player(code))
-        bests = await self._api_rating_bests(code)
+        bests_task = asyncio.create_task(self._api_rating_bests(code))
+        catalog_task = asyncio.create_task(self._get_catalog()) if self.render_b30_image else None
+        try:
+            bests = await bests_task
+        except Exception:
+            pending_tasks = [player_task]
+            if catalog_task is not None:
+                pending_tasks.append(catalog_task)
+            for task in pending_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+            raise
         try:
             player = await player_task
         except UserFacingError:
             player = {"friend_code": code}
+        except Exception:
+            if catalog_task is not None and not catalog_task.done():
+                catalog_task.cancel()
+                await asyncio.gather(catalog_task, return_exceptions=True)
+            raise
 
-        title = self._player_title(player, code)
+        if self.render_b30_image:
+            try:
+                assert catalog_task is not None
+                catalog = await catalog_task
+                return await self._render_b30(player, bests, catalog)
+            except Exception as exc:
+                logger.error(f"B30 图片生成失败，已回退文本：{exc}")
+                logger.error(traceback.format_exc())
+
+        return self._format_b30_text(player, bests, code)
+
+    def _format_b30_text(self, player: dict[str, Any], bests: dict[str, Any], code: str) -> str:
+
+        title = self._player_title(player, code, include_friend_code=self.show_friend_code)
         lines = [f"{title} Rating 构成"]
         if player:
             summary = self._player_summary_line(player)
@@ -439,9 +494,9 @@ class ChunithmLxnsPlugin(Star):
         player_name = ""
         try:
             player = await self._api_player(code)
-            player_name = self._player_title(player, code)
+            player_name = self._player_title(player, code, include_friend_code=self.show_friend_code)
         except UserFacingError:
-            player_name = f"好友码 {code}"
+            player_name = f"好友码 {code}" if self.show_friend_code else "未知玩家"
 
         lines = [f"{player_name} Recent {count}"]
         for idx, score in enumerate(recents[:count], start=1):
@@ -559,7 +614,7 @@ class ChunithmLxnsPlugin(Star):
             timeout = aiohttp.ClientTimeout(total=self.timeout_seconds, connect=8)
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
-                headers={"User-Agent": f"{PLUGIN_NAME}/0.1.0 AstrBot"},
+                headers={"User-Agent": f"{PLUGIN_NAME}/0.2.0 AstrBot"},
             )
         return self.session
 
@@ -628,6 +683,187 @@ class ChunithmLxnsPlugin(Star):
     async def _api_recents(self, friend_code: str) -> list[dict[str, Any]]:
         data = await self._request("GET", f"chunithm/player/{friend_code}/recents")
         return data or []
+
+    async def _render_b30(
+        self,
+        player: dict[str, Any],
+        bests: dict[str, Any],
+        catalog: dict[str, Any],
+    ) -> Path:
+        section_specs = [
+            ("BEST 30", list(bests.get("bests") or [])[: self.b30_show_count]),
+            ("SELECTION 10", list(bests.get("selections") or [])[: self.selection_show_count]),
+            ("NEW 20", list(bests.get("new_bests") or [])[:20]),
+        ]
+        if not any(rows for _, rows in section_specs):
+            raise UserFacingError("落雪没有返回 Rating 构成数据。")
+
+        songs_by_id = {
+            _safe_int(song.get("id"), -1): song
+            for song in catalog.get("songs") or []
+            if song.get("id") is not None
+        }
+        song_ids = {
+            _safe_int(score.get("id"), -1)
+            for _, rows in section_specs
+            for score in rows
+            if score.get("id") is not None
+        }
+        jacket_paths = await self._cache_jackets(song_ids)
+        player_assets = await self._cache_player_assets(player)
+
+        sections = [
+            (
+                title,
+                enrich_scores_with_catalog(rows, songs_by_id, jacket_paths),
+            )
+            for title, rows in section_specs
+            if rows
+        ]
+        self._validate_rating_sections(sections)
+
+        output_path = self.generated_dir / f"b30-{int(time.time())}-{uuid4().hex[:8]}.jpg"
+        async with self.render_semaphore:
+            await asyncio.to_thread(
+                self.renderer.render,
+                player,
+                sections,
+                output_path,
+                asset_paths=player_assets,
+                show_friend_code=self.show_friend_code,
+                show_play_count=self.show_play_count,
+                footer_bot_name=self.footer_bot_name,
+            )
+        self._cleanup_generated_images()
+        return output_path
+
+    @staticmethod
+    def _validate_rating_sections(sections: list[tuple[str, list[dict[str, Any]]]]) -> None:
+        seen: dict[tuple[int, int], str] = {}
+        for title, rows in sections:
+            for score in rows:
+                key = (
+                    _safe_int(score.get("id"), -1),
+                    _safe_int(score.get("level_index"), -1),
+                )
+                if key[0] < 0 or key[1] < 0:
+                    raise ValueError(f"{title} 包含无效成绩记录：{score}")
+                if key in seen:
+                    raise ValueError(f"Rating 分组重复谱面：{key}（{seen[key]} / {title}）")
+                seen[key] = title
+
+    async def _cache_jackets(self, song_ids: set[int]) -> dict[int, Path]:
+        pairs = await asyncio.gather(
+            *(
+                self._cache_asset("jacket", song_id, required=False)
+                for song_id in sorted(song_id for song_id in song_ids if song_id >= 0)
+            ),
+        )
+        return {
+            song_id: path
+            for song_id, path in zip(sorted(song_id for song_id in song_ids if song_id >= 0), pairs)
+            if path is not None
+        }
+
+    async def _cache_player_assets(self, player: dict[str, Any]) -> dict[str, Path | None]:
+        requests: dict[str, tuple[str, Any] | None] = {
+            "character": self._collection_request(player.get("character"), "character"),
+            "plate": self._collection_request(player.get("name_plate"), "plate"),
+            "icon": self._collection_request(player.get("map_icon"), "icon"),
+            "trophy": self._collection_request(player.get("trophy"), "trophy")
+            if str((player.get("trophy") or {}).get("color") or "").lower() == "image"
+            else None,
+        }
+        active = [(name, request) for name, request in requests.items() if request is not None]
+        downloaded = await asyncio.gather(
+            *(self._cache_asset(kind, asset_id, required=False) for _, (kind, asset_id) in active),
+        )
+        result: dict[str, Path | None] = {name: None for name in requests}
+        for (name, _), path in zip(active, downloaded):
+            result[name] = path
+        return result
+
+    @staticmethod
+    def _collection_request(collection: Any, kind: str) -> tuple[str, Any] | None:
+        if not isinstance(collection, dict) or collection.get("id") is None:
+            return None
+        return kind, collection.get("id")
+
+    async def _cache_asset(self, kind: str, asset_id: Any, *, required: bool) -> Path | None:
+        safe_id = str(asset_id).strip()
+        if not re.fullmatch(r"\d{1,12}", safe_id):
+            if required:
+                raise ValueError(f"无效的 {kind} 素材 ID：{asset_id}")
+            return None
+
+        directory = self.asset_cache_dir / kind
+        path = directory / f"{safe_id}.png"
+        if self._valid_cached_image(path):
+            return path
+
+        lock_key = f"{kind}:{safe_id}"
+        lock = self.asset_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            if self._valid_cached_image(path):
+                return path
+            url = f"{self.asset_base}/{kind}/{safe_id}.png"
+            try:
+                session = await self._get_session()
+                async with self.asset_download_semaphore:
+                    async with session.get(url) as response:
+                        if response.status != 200:
+                            if required:
+                                raise UserFacingError(f"落雪素材下载失败：{kind}/{safe_id}（HTTP {response.status}）")
+                            return None
+                        content_type = str(response.headers.get("Content-Type") or "")
+                        data = await response.read()
+                        if not data or (content_type and not content_type.startswith("image/")):
+                            if required:
+                                raise UserFacingError(f"落雪素材返回内容无效：{kind}/{safe_id}")
+                            return None
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                if required:
+                    raise UserFacingError(f"落雪素材下载失败：{exc}") from exc
+                logger.warning(f"下载落雪素材失败 {kind}/{safe_id}：{exc}")
+                return None
+
+            directory.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(".png.tmp")
+            try:
+                tmp_path.write_bytes(data)
+                if not self._valid_cached_image(tmp_path):
+                    tmp_path.unlink(missing_ok=True)
+                    if required:
+                        raise UserFacingError(f"落雪素材不是有效图片：{kind}/{safe_id}")
+                    return None
+                tmp_path.replace(path)
+                return path
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _valid_cached_image(path: Path) -> bool:
+        if not path.exists() or path.stat().st_size < 64:
+            return False
+        try:
+            from PIL import Image
+
+            with Image.open(path) as image:
+                image.verify()
+            return True
+        except Exception:
+            return False
+
+    def _cleanup_generated_images(self, max_age_seconds: int = 24 * 60 * 60) -> None:
+        if not self.generated_dir.exists():
+            return
+        cutoff = _now() - max_age_seconds
+        for path in self.generated_dir.glob("b30-*.jpg"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                pass
 
     async def _get_catalog(self, force: bool = False) -> dict[str, Any]:
         async with self.catalog_lock:
@@ -835,7 +1071,13 @@ class ChunithmLxnsPlugin(Star):
         tmp_path.replace(path)
 
     def _format_player(self, player: dict[str, Any]) -> str:
-        lines = [self._player_title(player, str(player.get("friend_code") or "-"))]
+        lines = [
+            self._player_title(
+                player,
+                str(player.get("friend_code") or "-"),
+                include_friend_code=self.show_friend_code,
+            ),
+        ]
         summary = self._player_summary_line(player)
         if summary:
             lines.append(summary)
@@ -860,9 +1102,17 @@ class ChunithmLxnsPlugin(Star):
             lines.append(f"同步时间：{_format_time(player.get('upload_time'))}")
         return "\n".join(lines)
 
-    def _player_title(self, player: dict[str, Any] | None, fallback_code: str) -> str:
+    def _player_title(
+        self,
+        player: dict[str, Any] | None,
+        fallback_code: str,
+        *,
+        include_friend_code: bool = True,
+    ) -> str:
         player = player or {}
         name = player.get("name") or "未知玩家"
+        if not include_friend_code:
+            return str(name)
         code = player.get("friend_code") or fallback_code
         return f"{name}（{code}）"
 
@@ -874,7 +1124,7 @@ class ChunithmLxnsPlugin(Star):
             parts.append(f"Lv.{player.get('level')}")
         if player.get("over_power") is not None:
             parts.append(f"OVER POWER {_format_number(player.get('over_power'), 2)}")
-        if player.get("total_play_count") is not None:
+        if self.show_play_count and player.get("total_play_count") is not None:
             parts.append(f"游玩 {_format_number(player.get('total_play_count'))}")
         return " / ".join(parts)
 
