@@ -167,6 +167,11 @@ class RendererTests(unittest.TestCase):
         self.assertFalse(schema["show_friend_code"]["default"])
         self.assertFalse(schema["show_play_count"]["default"])
 
+    def test_default_background_does_not_use_a_promotional_screenshot(self) -> None:
+        renderer = renderer_module.ChunithmBestRenderer(PLUGIN_DIR / "static")
+        self.assertIsNone(renderer.background_path)
+        self.assertFalse((PLUGIN_DIR / "static" / "ui" / "official-2026-ui.jpg").exists())
+
     def test_fixture_renders(self) -> None:
         player, songs, scores = _fixture()
         with tempfile.TemporaryDirectory() as directory:

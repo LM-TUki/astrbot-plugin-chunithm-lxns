@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 
 WIDTH = 1700
@@ -209,7 +209,7 @@ class ChunithmBestRenderer:
         self.static_dir = static_dir
         self.ui_dir = static_dir / "ui"
         self.fonts = FontBook(static_dir)
-        self.background_path = background_path if background_path and background_path.exists() else self.ui_dir / "official-2026-ui.jpg"
+        self.background_path = background_path if background_path and background_path.exists() else None
         self._image_cache: dict[str, Image.Image] = {}
 
     def _ui_image(self, name: str, *, remove_white: bool = False) -> Image.Image | None:
@@ -263,20 +263,57 @@ class ChunithmBestRenderer:
         return 54 + cards_height + 32
 
     def _build_background(self, height: int) -> Image.Image:
-        canvas = Image.new("RGBA", (WIDTH, height), (230, 246, 248, 255))
-        if self.background_path.exists():
+        top = (218, 255, 248, 255)
+        middle = (237, 247, 255, 255)
+        bottom = (252, 244, 255, 255)
+        colors: list[tuple[int, int, int, int]] = []
+        for y in range(height):
+            position = y / max(1, height - 1)
+            if position < 0.42:
+                ratio = position / 0.42
+                start, end = top, middle
+            else:
+                ratio = (position - 0.42) / 0.58
+                start, end = middle, bottom
+            colors.append(tuple(round(start[index] + (end[index] - start[index]) * ratio) for index in range(4)))
+
+        gradient = Image.new("RGBA", (1, height))
+        gradient.putdata(colors)
+        canvas = gradient.resize((WIDTH, height))
+
+        if self.background_path:
             background_key = f"background:{self.background_path}"
             if background_key not in self._image_cache:
                 with Image.open(self.background_path) as background:
                     self._image_cache[background_key] = background.convert("RGBA")
-            source = self._image_cache[background_key].convert("RGB")
-            source = ImageEnhance.Color(source).enhance(1.03)
-            source = ImageEnhance.Brightness(source).enhance(1.13)
-            source = _cover(source, (WIDTH, 650)).filter(ImageFilter.GaussianBlur(0.8))
-            canvas.alpha_composite(source.convert("RGBA"), (0, 0))
+            source = _cover(self._image_cache[background_key], (WIDTH, 650))
+            canvas.alpha_composite(source, (0, 0))
+            ImageDraw.Draw(canvas, "RGBA").rectangle((0, 0, WIDTH, 650), fill=(244, 252, 255, 116))
 
         draw = ImageDraw.Draw(canvas, "RGBA")
-        draw.rectangle((0, 290, WIDTH, height), fill=(234, 246, 248, 220))
+        draw.polygon(((0, 0), (790, 0), (505, 290), (0, 290)), fill=(32, 218, 203, 48))
+        draw.polygon(((730, 0), (WIDTH, 0), (WIDTH, 290), (1035, 290)), fill=(184, 78, 224, 42))
+        draw.polygon(((1220, 0), (WIDTH, 0), (WIDTH, 112), (1395, 208)), fill=(255, 94, 160, 42))
+        draw.polygon(((0, 0), (365, 0), (0, 205)), fill=(255, 222, 75, 40))
+
+        for box, color, width in (
+            ((-345, -535, 875, 475), (10, 192, 202, 90), 9),
+            ((-255, -455, 965, 555), (255, 255, 255, 135), 4),
+            ((-165, -375, 1055, 635), (167, 76, 219, 62), 5),
+            ((930, -610, 1920, 365), (255, 111, 177, 74), 7),
+            ((1015, -520, 2005, 455), (255, 255, 255, 118), 4),
+        ):
+            draw.arc(box, start=205, end=355, fill=color, width=width)
+
+        for x in range(-500, WIDTH + 500, 110):
+            draw.line((x, -30, x + 410, 305), fill=(255, 255, 255, 72), width=2)
+        for x in range(0, WIDTH + 1, 85):
+            draw.line((x, 0, x, 290), fill=(74, 166, 191, 22), width=1)
+        for y in range(0, 291, 58):
+            draw.line((0, y, WIDTH, y), fill=(74, 166, 191, 22), width=1)
+
+        draw.rectangle((0, 290, WIDTH, height), fill=(244, 250, 253, 218))
+        draw.line((0, 290, WIDTH, 290), fill=(255, 255, 255, 210), width=3)
         for y in range(310, height, 340):
             draw.polygon(((0, y + 210), (610, y), (1020, y), (350, y + 340), (0, y + 340)), fill=(37, 209, 202, 48))
             draw.polygon(((WIDTH, y), (1250, y + 70), (970, y + 340), (WIDTH, y + 245)), fill=(173, 77, 220, 42))
