@@ -7,6 +7,7 @@ import re
 import socket
 import time
 import traceback
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from .renderer import ChunithmBestRenderer, enrich_scores_with_catalog
 
 
 PLUGIN_NAME = "astrbot_plugin_chunithm_lxns"
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.4.1"
 DATA_DIR = Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
 MAX_COMMAND_LENGTH = 512
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -196,7 +197,19 @@ def _format_time(value: Any) -> str:
     if not value:
         return "-"
     text = str(value)
+    text = re.sub(r"(\d{2}:\d{2}:\d{2})\.\d+", r"\1", text)
     return text.replace("T", " ").replace("Z", " UTC")
+
+
+def _truncate_display(text: Any, max_width: int) -> str:
+    value = str(text or "")
+    width = 0
+    for index, char in enumerate(value):
+        char_width = 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+        if width + char_width > max_width - 3:
+            return value[:index].rstrip() + "..."
+        width += char_width
+    return value
 
 
 def _is_friend_code_token(token: str) -> bool:
@@ -605,7 +618,7 @@ class ChunithmLxnsPlugin(Star):
             score = await self._api_best_score(code, {**params, "level_index": level_index})
             lines = [
                 f"{self._song_display_name(song, query)} 单曲最佳",
-                self._format_score_line(score),
+                self._format_score_line(score, include_title=False),
             ]
             return BotResponse(text="\n".join(lines), image=self._song_jacket(song))
 
@@ -614,7 +627,7 @@ class ChunithmLxnsPlugin(Star):
             scores = [scores]
         lines = [f"{self._song_display_name(song, query)} 全难度成绩"]
         for idx, score in enumerate(scores or [], start=1):
-            lines.append(self._format_score_line(score, idx=idx))
+            lines.append(self._format_score_line(score, idx=idx, include_title=False))
         if len(lines) == 1:
             lines.append("没有查到这首歌的缓存成绩。")
         return BotResponse(text="\n".join(lines), image=self._song_jacket(song))
@@ -648,7 +661,7 @@ class ChunithmLxnsPlugin(Star):
         aliases = await self._aliases_for_song(song.get("id"))
         lines = [f"{song.get('id')} - {song.get('title')} 的别名"]
         if aliases:
-            lines.extend(f"- {alias}" for alias in aliases[:40])
+            lines.extend(f"- {_truncate_display(alias, 64)}" for alias in aliases[:40])
             if len(aliases) > 40:
                 lines.append(f"... 还有 {len(aliases) - 40} 个")
         else:
@@ -679,8 +692,11 @@ class ChunithmLxnsPlugin(Star):
             return "没有找到符合条件的随机谱面。示例：/chu random 14+ mas"
 
         song, diff = random.choice(candidates)
-        lines = ["随机中二节奏谱面"]
-        lines.append(self._format_song_brief(song))
+        lines = [
+            "随机中二节奏谱面",
+            f"{song.get('id')} - {_truncate_display(song.get('title') or '-', 58)}",
+            f"艺术家：{_truncate_display(song.get('artist') or '-', 46)} / BPM：{song.get('bpm', '-')}",
+        ]
         lines.append(self._format_difficulty_detail(diff))
         jacket_id = diff.get("origin_id") if diff.get("difficulty") == 5 else song.get("id")
         jacket = self.asset_store.find("jacket", jacket_id) or self._song_jacket(song)
@@ -1337,21 +1353,22 @@ class ChunithmLxnsPlugin(Star):
         *,
         idx: int | None = None,
         include_time: bool = False,
+        include_title: bool = True,
     ) -> str:
         prefix = f"#{idx:02d} " if idx is not None else ""
-        title = score.get("song_name") or f"ID {score.get('id', '-')}"
+        title = _truncate_display(score.get("song_name") or f"ID {score.get('id', '-')}", 52)
         diff = LEVEL_SHORT.get(score.get("level_index"), str(score.get("level_index", "-")))
         level = score.get("level") or "-"
         score_value = _format_number(score.get("score"))
         rating = _format_number(score.get("rating"), 2)
         rank = RANK_NAMES.get(str(score.get("rank") or "").lower(), str(score.get("rank") or "-").upper())
         badges = self._score_badges(score)
-        line = f"{prefix}{rating} / {score_value} / {rank} [{diff} {level}] {title}"
-        if badges:
-            line += f" {' '.join(badges)}"
+        heading = f"{prefix}{title} [{diff} {level}]" if include_title else f"{prefix}[{diff} {level}]"
+        detail_parts = [score_value, rank, f"Rating {rating}", *badges]
+        lines = [heading, "  " + " / ".join(detail_parts)]
         if include_time:
-            line += f" / {_format_time(score.get('play_time') or score.get('last_played_time'))}"
-        return line
+            lines.append(f"  时间：{_format_time(score.get('play_time') or score.get('last_played_time'))}")
+        return "\n".join(lines)
 
     def _score_badges(self, score: dict[str, Any]) -> list[str]:
         badges = []
@@ -1370,8 +1387,13 @@ class ChunithmLxnsPlugin(Star):
 
     def _format_song_brief(self, song: dict[str, Any]) -> str:
         levels = self._format_song_levels(song)
-        artist = song.get("artist") or "-"
-        return f"{song.get('id')} - {song.get('title')} / {artist} / BPM {song.get('bpm', '-')} / {levels}"
+        title = _truncate_display(song.get("title") or "-", 58)
+        artist = _truncate_display(song.get("artist") or "-", 46)
+        return (
+            f"{song.get('id')} - {title}\n"
+            f"  艺术家：{artist} / BPM：{song.get('bpm', '-')}\n"
+            f"  难度：{levels}"
+        )
 
     def _format_song_detail(self, song: dict[str, Any], aliases: list[str]) -> str:
         lines = [
@@ -1388,8 +1410,8 @@ class ChunithmLxnsPlugin(Star):
         for diff in song.get("difficulties") or []:
             lines.append(f"- {self._format_difficulty_detail(diff)}")
         if aliases:
-            shown = "、".join(aliases[:12])
-            lines.append(f"别名：{shown}")
+            lines.append("别名：")
+            lines.extend(f"- {_truncate_display(alias, 60)}" for alias in aliases[:12])
             if len(aliases) > 12:
                 lines.append(f"还有 {len(aliases) - 12} 个别名，可用 /chu alias {song.get('id')} 查看。")
         jacket = self._song_jacket(song)
@@ -1416,13 +1438,15 @@ class ChunithmLxnsPlugin(Star):
         notes = diff.get("notes") or {}
         total = notes.get("total")
         value_part = f" / 定数 {value}" if value is not None else ""
-        notes_part = f" / 物量 {total}" if total is not None else ""
+        details = [f"谱师：{designer}"]
+        if total is not None:
+            details.append(f"物量：{total}")
         extra = ""
         if diff.get("difficulty") == 5:
             kanji = diff.get("kanji") or ""
             star = diff.get("star")
             extra = f" / {kanji}{star or ''}"
-        return f"{name} {level}{value_part} / 谱师 {designer}{notes_part}{extra}"
+        return f"{name} {level}{value_part}{extra}\n  {' / '.join(details)}"
 
     def _difficulty_matches_level(self, diff: dict[str, Any], level_filter: str) -> bool:
         level_filter = level_filter.strip().lower()

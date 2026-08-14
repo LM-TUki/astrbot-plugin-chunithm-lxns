@@ -107,6 +107,16 @@ def _jackets(directory: Path) -> dict[int, Path]:
 
 
 class RendererTests(unittest.TestCase):
+    def test_long_card_title_is_ellipsized_to_available_width(self) -> None:
+        renderer = renderer_module.ChunithmBestRenderer(PLUGIN_DIR / "static")
+        image = Image.new("RGBA", (300, 80), "white")
+        draw = ImageDraw.Draw(image)
+        font = renderer.fonts.font(17)
+        title = "测试用超长歌曲名称 The Future of CHUNITHM Is Here"
+        result = renderer_module._ellipsize(draw, title, font, 120)
+        self.assertTrue(result.endswith("..."))
+        self.assertLessEqual(draw.textlength(result, font=font), 120)
+
     def test_catalog_join_preserves_api_order_and_constants(self) -> None:
         _, songs, scores = _fixture()
         with tempfile.TemporaryDirectory() as directory:

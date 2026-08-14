@@ -135,6 +135,21 @@ def _open_rgba(path: Path) -> Image.Image:
         return source.convert("RGBA").copy()
 
 
+def _ellipsize(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    suffix = "..."
+    suffix_width = draw.textlength(suffix, font=font)
+    low, high = 0, len(text)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if draw.textlength(text[:midpoint], font=font) + suffix_width <= max_width:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return text[:low].rstrip() + suffix
+
+
 def _remove_edge_white(image: Image.Image, tolerance: int = 18) -> Image.Image:
     image = image.convert("RGBA")
     pixels = image.load()
@@ -471,7 +486,10 @@ class ChunithmBestRenderer:
 
         info_x = 127
         title = str(score.get("song_name") or f"ID {score.get('id', '-')}")
-        draw.text((info_x, 6), title, font=self.fonts.fit(draw, title, CARD_WIDTH - info_x - 44, 17, 10), fill=WHITE)
+        title_width = CARD_WIDTH - info_x - 44
+        title_font = self.fonts.fit(draw, title, title_width, 17, 10)
+        title = _ellipsize(draw, title, title_font, title_width)
+        draw.text((info_x, 6), title, font=title_font, fill=WHITE)
         draw.text((CARD_WIDTH - 8, 7), f"#{index}", font=self.fonts.font(12, latin=True), fill=WHITE, anchor="ra")
         draw.text((info_x, 34), f"{_as_int(score.get('score')):,}", font=self.fonts.font(25, latin=True), fill=WHITE)
         draw.text((CARD_WIDTH - 8, 55), f"Ra {_as_float(score.get('rating')):.2f}", font=self.fonts.font(11, latin=True), fill=WHITE, anchor="ra")
