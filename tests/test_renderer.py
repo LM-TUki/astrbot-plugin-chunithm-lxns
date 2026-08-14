@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageStat
 
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -167,10 +167,27 @@ class RendererTests(unittest.TestCase):
         common = {**scores["new_bests"][0], "level_value": 14.4}
         expert = renderer._draw_card({**common, "level_index": 2}, 1)
         ultima = renderer._draw_card({**common, "level_index": 4}, 1)
-        expert_color = expert.getpixel((300, 88))
-        ultima_color = ultima.getpixel((300, 88))
+        expert_color = ImageStat.Stat(expert.crop((140, 4, 295, 34))).mean[:3]
+        ultima_color = ImageStat.Stat(ultima.crop((140, 4, 295, 34))).mean[:3]
         self.assertNotEqual(expert_color, ultima_color)
-        self.assertLess(sum(ultima_color[:3]), sum(expert_color[:3]))
+        self.assertLess(sum(ultima_color), sum(expert_color))
+
+    def test_jacket_is_flush_with_card_body(self) -> None:
+        renderer = renderer_module.ChunithmBestRenderer(PLUGIN_DIR / "static")
+        _, _, scores = _fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            jacket = Path(directory) / "jacket.png"
+            Image.new("RGB", (128, 128), (12, 88, 164)).save(jacket)
+            card = renderer._draw_card({**scores["bests"][0], "jacket_path": str(jacket)}, 1)
+        self.assertEqual(card.getpixel((10, 10))[:3], (12, 88, 164))
+        self.assertEqual(card.getpixel((118, 118))[:3], (12, 88, 164))
+
+    def test_card_omits_difficulty_name_and_level_text(self) -> None:
+        import inspect
+
+        source = inspect.getsource(renderer_module.ChunithmBestRenderer._draw_card)
+        self.assertNotIn("difficulty_label", source)
+        self.assertNotIn('f"Lv.', source)
 
     def test_privacy_options_default_to_false(self) -> None:
         schema = json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8"))

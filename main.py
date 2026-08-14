@@ -26,7 +26,7 @@ from .renderer import ChunithmBestRenderer, enrich_scores_with_catalog
 
 
 PLUGIN_NAME = "astrbot_plugin_chunithm_lxns"
-PLUGIN_VERSION = "0.4.1"
+PLUGIN_VERSION = "0.5.0"
 DATA_DIR = Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
 MAX_COMMAND_LENGTH = 512
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024

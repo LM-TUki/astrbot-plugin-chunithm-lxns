@@ -11,12 +11,15 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 
 WIDTH = 1700
-MARGIN = 34
+MARGIN = 42
 COLUMNS = 5
-GAP_X = 18
-GAP_Y = 18
+GAP_X = 16
+GAP_Y = 16
 CARD_WIDTH = (WIDTH - MARGIN * 2 - GAP_X * (COLUMNS - 1)) // COLUMNS
-CARD_HEIGHT = 130
+CARD_HEIGHT = 132
+JACKET_SIZE = 128
+BADGE_WIDTH = 82
+BADGE_HEIGHT = 22
 
 DIFFICULTY_NAMES = {
     0: "BASIC",
@@ -30,12 +33,12 @@ DIFFICULTY_NAMES = {
 # ULTIMA intentionally uses a dark neutral body and warning-red edge. EXPERT
 # keeps the official red family, so the two remain distinguishable at a glance.
 DIFFICULTY_STYLES = {
-    0: {"main": (72, 181, 62), "dark": (43, 119, 49), "label": "BASIC"},
-    1: {"main": (235, 173, 28), "dark": (171, 112, 16), "label": "ADVANCED"},
-    2: {"main": (239, 71, 55), "dark": (188, 41, 37), "label": "EXPERT"},
-    3: {"main": (151, 30, 222), "dark": (91, 31, 153), "label": "MASTER"},
-    4: {"main": (32, 35, 43), "dark": (12, 14, 19), "edge": (244, 42, 67), "label": "ULTIMA"},
-    5: {"main": (54, 58, 67), "dark": (20, 23, 29), "edge": (84, 214, 229), "label": "WORLD'S END"},
+    0: {"main": (67, 177, 84), "dark": (32, 105, 54), "edge": (108, 220, 120)},
+    1: {"main": (232, 166, 28), "dark": (148, 92, 5), "edge": (255, 207, 68)},
+    2: {"main": (231, 67, 65), "dark": (150, 33, 40), "edge": (255, 105, 99)},
+    3: {"main": (135, 44, 218), "dark": (74, 27, 139), "edge": (180, 90, 255)},
+    4: {"main": (28, 31, 39), "dark": (8, 10, 15), "edge": (245, 47, 67)},
+    5: {"main": (43, 48, 58), "dark": (14, 17, 23), "edge": (63, 213, 227)},
 }
 
 SECTION_STYLES = {
@@ -93,8 +96,8 @@ TROPHY_COLORS = {
     "rainbow": ((235, 214, 255), (88, 55, 126)),
 }
 
-INK = (25, 29, 42)
-MUTED = (96, 108, 127)
+INK = (18, 22, 31)
+MUTED = (91, 101, 116)
 WHITE = (255, 255, 255)
 
 
@@ -207,21 +210,38 @@ class FontBook:
                 return path
         raise FileNotFoundError("No usable font was found for the CHUNITHM renderer")
 
-    @lru_cache(maxsize=96)
-    def font(self, size: int, *, latin: bool = False) -> ImageFont.FreeTypeFont:
+    @lru_cache(maxsize=192)
+    def font(self, size: int, *, latin: bool = False, weight: str = "bold") -> ImageFont.FreeTypeFont:
         font = ImageFont.truetype(str(self.latin if latin else self.cjk), size)
         try:
-            font.set_variation_by_name("SemiBold" if latin else "Bold")
+            variation = {
+                "regular": "Regular",
+                "medium": "Medium",
+                "semibold": "SemiBold",
+                "bold": "Bold",
+                "black": "Black",
+            }.get(weight, "Bold")
+            font.set_variation_by_name(variation)
         except (AttributeError, OSError, ValueError):
             pass
         return font
 
-    def fit(self, draw: ImageDraw.ImageDraw, text: str, width: int, start: int, minimum: int = 10) -> ImageFont.FreeTypeFont:
+    def fit(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        width: int,
+        start: int,
+        minimum: int = 10,
+        *,
+        latin: bool = False,
+        weight: str = "bold",
+    ) -> ImageFont.FreeTypeFont:
         for size in range(start, minimum - 1, -1):
-            font = self.font(size)
+            font = self.font(size, latin=latin, weight=weight)
             if draw.textbbox((0, 0), text, font=font)[2] <= width:
                 return font
-        return self.font(minimum)
+        return self.font(minimum, latin=latin, weight=weight)
 
 
 class ChunithmBestRenderer:
@@ -257,7 +277,7 @@ class ChunithmBestRenderer:
         footer_bot_name: str = "EmuBot",
     ) -> Path:
         visible_sections = [(title, rows) for title, rows in sections if rows]
-        height = 340 + sum(self._section_height(len(rows)) for _, rows in visible_sections) + 95
+        height = 334 + sum(self._section_height(len(rows)) for _, rows in visible_sections) + 92
         canvas = self._build_background(height)
         self._draw_player_header(
             canvas,
@@ -280,65 +300,43 @@ class ChunithmBestRenderer:
     def _section_height(row_count: int) -> int:
         lines = math.ceil(row_count / COLUMNS)
         cards_height = lines * CARD_HEIGHT + max(0, lines - 1) * GAP_Y
-        return 54 + cards_height + 32
+        return 60 + cards_height + 34
 
     def _build_background(self, height: int) -> Image.Image:
-        top = (218, 255, 248, 255)
-        middle = (237, 247, 255, 255)
-        bottom = (252, 244, 255, 255)
-        colors: list[tuple[int, int, int, int]] = []
-        for y in range(height):
-            position = y / max(1, height - 1)
-            if position < 0.42:
-                ratio = position / 0.42
-                start, end = top, middle
-            else:
-                ratio = (position - 0.42) / 0.58
-                start, end = middle, bottom
-            colors.append(tuple(round(start[index] + (end[index] - start[index]) * ratio) for index in range(4)))
-
-        gradient = Image.new("RGBA", (1, height))
-        gradient.putdata(colors)
-        canvas = gradient.resize((WIDTH, height))
+        canvas = Image.new("RGBA", (WIDTH, height), (242, 245, 248, 255))
+        draw = ImageDraw.Draw(canvas, "RGBA")
+        draw.rectangle((0, 0, WIDTH, 286), fill=(252, 253, 254, 255))
+        draw.rectangle((0, 0, 520, 10), fill=(248, 207, 56, 255))
+        draw.rectangle((520, 0, 1130, 10), fill=(27, 194, 205, 255))
+        draw.rectangle((1130, 0, WIDTH, 10), fill=(215, 73, 185, 255))
 
         if self.background_path:
             background_key = f"background:{self.background_path}"
             if background_key not in self._image_cache:
                 with Image.open(self.background_path) as background:
                     self._image_cache[background_key] = background.convert("RGBA")
-            source = _cover(self._image_cache[background_key], (WIDTH, 650))
+            source = _cover(self._image_cache[background_key], (WIDTH, 286))
             canvas.alpha_composite(source, (0, 0))
-            ImageDraw.Draw(canvas, "RGBA").rectangle((0, 0, WIDTH, 650), fill=(244, 252, 255, 116))
+            draw.rectangle((0, 0, WIDTH, 286), fill=(250, 252, 254, 184))
 
-        draw = ImageDraw.Draw(canvas, "RGBA")
-        draw.polygon(((0, 0), (790, 0), (505, 290), (0, 290)), fill=(32, 218, 203, 48))
-        draw.polygon(((730, 0), (WIDTH, 0), (WIDTH, 290), (1035, 290)), fill=(184, 78, 224, 42))
-        draw.polygon(((1220, 0), (WIDTH, 0), (WIDTH, 112), (1395, 208)), fill=(255, 94, 160, 42))
-        draw.polygon(((0, 0), (365, 0), (0, 205)), fill=(255, 222, 75, 40))
+        for x in range(0, WIDTH + 1, 92):
+            draw.line((x, 286, x, height), fill=(51, 72, 91, 13), width=1)
+        for y in range(286, height, 92):
+            draw.line((0, y, WIDTH, y), fill=(51, 72, 91, 13), width=1)
+        for offset in range(-height, WIDTH + height, 250):
+            draw.line((offset, 286, offset + height, height), fill=(255, 255, 255, 82), width=2)
 
-        for box, color, width in (
-            ((-345, -535, 875, 475), (10, 192, 202, 90), 9),
-            ((-255, -455, 965, 555), (255, 255, 255, 135), 4),
-            ((-165, -375, 1055, 635), (167, 76, 219, 62), 5),
-            ((930, -610, 1920, 365), (255, 111, 177, 74), 7),
-            ((1015, -520, 2005, 455), (255, 255, 255, 118), 4),
-        ):
-            draw.arc(box, start=205, end=355, fill=color, width=width)
+        draw.polygon(((0, 286), (345, 286), (0, 520)), fill=(25, 189, 202, 30))
+        draw.polygon(((WIDTH, 286), (1470, 286), (WIDTH, 515)), fill=(207, 64, 179, 26))
+        draw.line((22, 310, 22, height - 72), fill=(26, 188, 201, 150), width=4)
+        draw.line((WIDTH - 23, 310, WIDTH - 23, height - 72), fill=(213, 71, 184, 110), width=3)
 
-        for x in range(-500, WIDTH + 500, 110):
-            draw.line((x, -30, x + 410, 305), fill=(255, 255, 255, 72), width=2)
-        for x in range(0, WIDTH + 1, 85):
-            draw.line((x, 0, x, 290), fill=(74, 166, 191, 22), width=1)
-        for y in range(0, 291, 58):
-            draw.line((0, y, WIDTH, y), fill=(74, 166, 191, 22), width=1)
-
-        draw.rectangle((0, 290, WIDTH, height), fill=(244, 250, 253, 218))
-        draw.line((0, 290, WIDTH, 290), fill=(255, 255, 255, 210), width=3)
-        for y in range(310, height, 340):
-            draw.polygon(((0, y + 210), (610, y), (1020, y), (350, y + 340), (0, y + 340)), fill=(37, 209, 202, 48))
-            draw.polygon(((WIDTH, y), (1250, y + 70), (970, y + 340), (WIDTH, y + 245)), fill=(173, 77, 220, 42))
-        for offset in range(-500, WIDTH + 500, 330):
-            draw.line((offset, 300, offset + height // 2, height), fill=(255, 255, 255, 90), width=2)
+        for row in range(4):
+            for column in range(12):
+                x = 1070 + column * 22 + row * 7
+                y = 26 + row * 22
+                draw.ellipse((x, y, x + 5, y + 5), fill=(27, 35, 48, 60))
+        draw.line((0, 286, WIDTH, 286), fill=(24, 31, 43, 180), width=2)
         return canvas
 
     def _draw_player_header(
@@ -351,36 +349,45 @@ class ChunithmBestRenderer:
         show_play_count: bool,
     ) -> None:
         draw = ImageDraw.Draw(canvas, "RGBA")
-        panel = (MARGIN, 28, 1010, 278)
+        panel = (MARGIN, 30, 1050, 258)
+        draw.rounded_rectangle((MARGIN + 7, 37, 1057, 265), radius=7, fill=(20, 29, 42, 24))
         plate_path = asset_paths.get("plate")
         if plate_path and plate_path.exists():
-            plate = _cover(_open_rgba(plate_path), (panel[2] - panel[0], panel[3] - panel[1]))
-            plate = ImageEnhance.Brightness(plate).enhance(1.08)
+            panel_size = (panel[2] - panel[0], panel[3] - panel[1])
+            plate = _cover(_open_rgba(plate_path), panel_size)
+            plate = ImageEnhance.Brightness(plate).enhance(1.12)
+            plate = Image.alpha_composite(plate, Image.new("RGBA", panel_size, (255, 255, 255, 198)))
             canvas.paste(plate, (panel[0], panel[1]), _rounded_mask((panel[2] - panel[0], panel[3] - panel[1]), 8))
-            draw.rounded_rectangle(panel, radius=8, fill=(255, 255, 255, 118), outline=(111, 199, 217, 230), width=3)
         else:
-            draw.rounded_rectangle(panel, radius=8, fill=(255, 255, 255, 240), outline=(111, 199, 217, 230), width=3)
+            draw.rounded_rectangle(panel, radius=8, fill=(255, 255, 255, 248))
+        draw.rounded_rectangle(panel, radius=8, outline=(31, 43, 57, 210), width=2)
+        draw.rectangle((MARGIN, 30, MARGIN + 9, 258), fill=(24, 190, 203, 255))
+        draw.rectangle((MARGIN + 9, 30, MARGIN + 15, 258), fill=(239, 203, 56, 255))
+        draw.text((72, 49), "PLAYER PROFILE / CHUNITHM 2026", font=self.fonts.font(12, latin=True, weight="semibold"), fill=MUTED)
 
         trophy = player.get("trophy") or {}
         trophy_color = str(trophy.get("color") or "normal").lower()
         trophy_image = asset_paths.get("trophy")
         if trophy_color == "image" and trophy_image and trophy_image.exists():
-            banner = _contain(_open_rgba(trophy_image), (706, 48))
-            canvas.alpha_composite(banner, (51, 43))
+            banner = _contain(_open_rgba(trophy_image), (690, 42))
+            canvas.alpha_composite(banner, (66, 62))
         else:
             fill, text_color = TROPHY_COLORS.get(trophy_color, TROPHY_COLORS["normal"])
-            draw.rounded_rectangle((52, 43, 758, 94), radius=8, fill=(*fill, 244), outline=(255, 255, 255, 220), width=2)
-            draw.text((405, 68), str(trophy.get("name") or "NO TITLE"), font=self.fonts.fit(draw, str(trophy.get("name") or "NO TITLE"), 650, 22, 13), fill=text_color, anchor="mm")
+            draw.rounded_rectangle((68, 65, 758, 104), radius=4, fill=(*fill, 238), outline=(42, 54, 68, 62), width=1)
+            trophy_name = str(trophy.get("name") or "NO TITLE")
+            draw.text((413, 84), trophy_name, font=self.fonts.fit(draw, trophy_name, 640, 19, 12, weight="bold"), fill=text_color, anchor="mm")
 
         level = _as_int(player.get("level"))
         reborn = _as_int(player.get("reborn_count"))
         level_text = f"Lv.{level}" if not reborn else f"Re:{reborn}  Lv.{level}"
-        draw.text((58, 123), level_text, font=self.fonts.font(26), fill=INK)
+        draw.text((70, 126), level_text, font=self.fonts.font(24, weight="black"), fill=INK)
         player_name = str(player.get("name") or "UNKNOWN PLAYER")
-        draw.text((172, 115), player_name, font=self.fonts.fit(draw, player_name, 560, 38, 24), fill=INK)
+        player_font = self.fonts.fit(draw, player_name, 525, 34, 22, weight="black")
+        player_name = _ellipsize(draw, player_name, player_font, 525)
+        draw.text((180, 116), player_name, font=player_font, fill=INK)
 
-        draw.text((58, 180), "RATING", font=self.fonts.font(15, latin=True), fill=(47, 165, 178))
-        draw.text((161, 163), f"{_as_float(player.get('rating')):.2f}", font=self.fonts.font(40, latin=True), fill=(37, 42, 58))
+        draw.text((70, 181), "RATING", font=self.fonts.font(13, latin=True, weight="black"), fill=(18, 157, 174))
+        draw.text((70, 194), f"{_as_float(player.get('rating')):.2f}", font=self.fonts.font(38, latin=True, weight="black"), fill=INK)
 
         emblem = player.get("class_emblem") or {}
         medal = _as_int(emblem.get("medal"))
@@ -388,17 +395,19 @@ class ChunithmBestRenderer:
         medal_image = self._ui_image(f"class-medal/{medal}.webp") if medal else None
         base_image = self._ui_image(f"class-base/{base}.webp") if base else None
         if base_image is not None:
-            canvas.alpha_composite(_contain(base_image, (230, 45)), (320, 178))
+            canvas.alpha_composite(_contain(base_image, (205, 40)), (292, 190))
         if medal_image is not None:
-            canvas.alpha_composite(_contain(medal_image, (90, 70)), (320, 163))
+            canvas.alpha_composite(_contain(medal_image, (76, 62)), (292, 175))
         else:
-            draw.ellipse((326, 170, 380, 224), fill=(85, 55, 145), outline=(255, 215, 55), width=5)
-            draw.text((353, 197), self._class_mark(medal), font=self.fonts.font(21, latin=True), fill=WHITE, anchor="mm")
-        draw.text((414, 175), "CLASS", font=self.fonts.font(12, latin=True), fill=MUTED)
-        draw.text((414, 196), f"MEDAL {medal} / BASE {base}", font=self.fonts.font(17, latin=True), fill=INK)
+            draw.ellipse((298, 181, 346, 229), fill=(72, 45, 134), outline=(247, 206, 51), width=4)
+            draw.text((322, 205), self._class_mark(medal), font=self.fonts.font(19, latin=True, weight="black"), fill=WHITE, anchor="mm")
+        draw.text((375, 180), "CLASS EMBLEM", font=self.fonts.font(10, latin=True, weight="semibold"), fill=MUTED)
+        class_text_color = WHITE if base_image is not None else INK
+        draw.text((375, 204), f"MEDAL {medal} / BASE {base}", font=self.fonts.font(12, latin=True, weight="black"), fill=class_text_color)
 
-        draw.text((584, 175), "OVER POWER", font=self.fonts.font(12, latin=True), fill=MUTED)
-        draw.text((584, 196), f"{_as_float(player.get('over_power')):.2f}", font=self.fonts.font(21, latin=True), fill=INK)
+        draw.line((558, 178, 558, 230), fill=(39, 53, 69, 50), width=1)
+        draw.text((580, 183), "OVER POWER", font=self.fonts.font(11, latin=True, weight="semibold"), fill=MUTED)
+        draw.text((580, 202), f"{_as_float(player.get('over_power')):.2f}", font=self.fonts.font(20, latin=True, weight="black"), fill=INK)
 
         extras = []
         if show_friend_code and player.get("friend_code"):
@@ -406,29 +415,33 @@ class ChunithmBestRenderer:
         if show_play_count and player.get("total_play_count") is not None:
             extras.append(f"PLAY COUNT {_as_int(player.get('total_play_count')):,}")
         if extras:
-            draw.text((58, 246), "   /   ".join(extras), font=self.fonts.font(14, latin=True), fill=(58, 68, 84), anchor="lm")
+            draw.text((580, 234), " / ".join(extras), font=self.fonts.font(11, latin=True, weight="semibold"), fill=(58, 68, 84), anchor="lm")
 
         avatar_path = asset_paths.get("icon") or asset_paths.get("character")
         if avatar_path and avatar_path.exists():
-            avatar = _cover(_open_rgba(avatar_path), (150, 150))
-            canvas.paste(avatar, (805, 88), _rounded_mask((150, 150), 6))
+            avatar = _cover(_open_rgba(avatar_path), (164, 164))
+            canvas.paste(avatar, (844, 65), _rounded_mask((164, 164), 4))
         else:
-            draw.rounded_rectangle((805, 88, 955, 238), radius=6, fill=(226, 233, 240, 255))
-            draw.text((880, 163), "CHU", font=self.fonts.font(30, latin=True), fill=(117, 92, 154), anchor="mm")
-        draw.rounded_rectangle((800, 83, 960, 243), radius=9, outline=(106, 76, 162, 230), width=4)
+            draw.rectangle((844, 65, 1008, 229), fill=(226, 233, 240, 255))
+            draw.text((926, 147), "CHU", font=self.fonts.font(30, latin=True, weight="black"), fill=(117, 92, 154), anchor="mm")
+        draw.rectangle((839, 60, 1013, 234), outline=(25, 35, 48, 235), width=3)
+        draw.line((839, 60, 883, 60), fill=(24, 190, 203), width=6)
+        draw.line((969, 234, 1013, 234), fill=(214, 70, 184), width=6)
 
         logo_path = self.ui_dir / "logo-2026.png"
         if logo_path.exists():
             logo_source = self._ui_image("logo-2026.png", remove_white=True)
             if logo_source is not None:
-                logo = _contain(logo_source, (500, 230))
-                canvas.alpha_composite(logo, (WIDTH - MARGIN - 520, 6))
+                logo = _contain(logo_source, (490, 192))
+                canvas.alpha_composite(logo, (WIDTH - MARGIN - 500, 16))
         else:
-            draw.text((WIDTH - MARGIN, 78), "中二节奏 2026", font=self.fonts.font(44), fill=(93, 54, 138), anchor="ra")
+            draw.text((WIDTH - MARGIN, 82), "中二节奏 2026", font=self.fonts.font(44, weight="black"), fill=(93, 54, 138), anchor="ra")
 
-        draw.rounded_rectangle((1060, 225, WIDTH - MARGIN, 277), radius=9, fill=(255, 255, 255, 228), outline=(177, 133, 222, 180), width=2)
-        draw.text((1084, 251), "CHUNITHM 2026  RATING COMPOSITION", font=self.fonts.font(18, latin=True), fill=(61, 69, 91), anchor="lm")
-        draw.text((WIDTH - MARGIN - 20, 251), "B30 + N20", font=self.fonts.font(22, latin=True), fill=(116, 72, 164), anchor="rm")
+        banner = (1090, 210, WIDTH - MARGIN, 258)
+        draw.polygon(((banner[0], banner[1]), (banner[2], banner[1]), (banner[2], banner[3]), (banner[0] + 28, banner[3])), fill=(24, 32, 45, 242))
+        draw.rectangle((banner[0] + 28, banner[1], banner[0] + 39, banner[3]), fill=(27, 193, 205, 255))
+        draw.text((banner[0] + 58, 234), "RATING COMPOSITION", font=self.fonts.font(17, latin=True, weight="black"), fill=WHITE, anchor="lm")
+        draw.text((banner[2] - 18, 234), "B30 / S10 / N20", font=self.fonts.font(15, latin=True, weight="semibold"), fill=(91, 222, 228), anchor="rm")
 
     @staticmethod
     def _class_mark(medal: int) -> str:
@@ -438,18 +451,30 @@ class ChunithmBestRenderer:
         draw = ImageDraw.Draw(canvas, "RGBA")
         color = SECTION_STYLES.get(title, (90, 205, 217))
         average = sum(_as_float(row.get("rating")) for row in rows) / len(rows)
-        draw.rounded_rectangle((MARGIN, y, WIDTH - MARGIN, y + 40), radius=7, fill=(255, 255, 255, 230), outline=(*color, 245), width=2)
-        draw.polygon(((MARGIN, y), (MARGIN + 325, y), (MARGIN + 282, y + 40), (MARGIN, y + 40)), fill=(*color, 242))
-        draw.text((MARGIN + 18, y + 20), title, font=self.fonts.font(21, latin=True), fill=INK, anchor="lm")
-        draw.text((WIDTH - MARGIN - 15, y + 20), f"AVG {average:.2f}", font=self.fonts.font(18, latin=True), fill=(64, 73, 93), anchor="rm")
+        section_height = self._section_height(len(rows))
+        draw.rectangle((MARGIN - 10, y + 36, WIDTH - MARGIN + 10, y + section_height - 14), fill=(255, 255, 255, 126))
+        draw.line((MARGIN, y + 24, WIDTH - MARGIN, y + 24), fill=(28, 37, 49, 140), width=2)
+        section_number = {"BEST 30": "01", "SELECTION 10": "02", "NEW 20": "03"}.get(title, "--")
+        draw.text((MARGIN, y + 18), section_number, font=self.fonts.font(25, latin=True, weight="black"), fill=INK, anchor="lm")
+        tab_left = MARGIN + 58
+        tab_right = tab_left + 300
+        draw.polygon(((tab_left, y + 2), (tab_right, y + 2), (tab_right - 24, y + 45), (tab_left, y + 45)), fill=(*color, 255))
+        title_color = INK if sum(color) > 570 else WHITE
+        draw.text((tab_left + 20, y + 23), title, font=self.fonts.font(20, latin=True, weight="black"), fill=title_color, anchor="lm")
+        draw.text((tab_right + 5, y + 18), "RATING ARCHIVE", font=self.fonts.font(10, latin=True, weight="semibold"), fill=MUTED, anchor="lm")
+        draw.rectangle((WIDTH - MARGIN - 178, y + 3, WIDTH - MARGIN, y + 44), fill=(24, 32, 44, 245))
+        draw.text((WIDTH - MARGIN - 18, y + 23), f"AVG  {average:.2f}", font=self.fonts.font(16, latin=True, weight="black"), fill=WHITE, anchor="rm")
 
-        start_y = y + 54
+        start_y = y + 60
         for index, score in enumerate(rows, start=1):
             row, column = divmod(index - 1, COLUMNS)
             x = MARGIN + column * (CARD_WIDTH + GAP_X)
             card_y = start_y + row * (CARD_HEIGHT + GAP_Y)
             canvas.alpha_composite(self._draw_card(score, index), (x, card_y))
-        return y + self._section_height(len(rows))
+        bracket_y = y + section_height - 23
+        draw.line((MARGIN, bracket_y, MARGIN + 74, bracket_y), fill=(29, 40, 54, 105), width=2)
+        draw.line((WIDTH - MARGIN - 74, bracket_y, WIDTH - MARGIN, bracket_y), fill=(29, 40, 54, 105), width=2)
+        return y + section_height
 
     def _draw_card(self, score: dict[str, Any], index: int) -> Image.Image:
         difficulty = _as_int(score.get("level_index"), 3)
@@ -458,60 +483,59 @@ class ChunithmBestRenderer:
         dark = style["dark"]
         edge = style.get("edge", main)
 
-        card = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), (255, 255, 255, 250))
+        card = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), (0, 0, 0, 0))
         draw = ImageDraw.Draw(card, "RGBA")
-        draw.rounded_rectangle((0, 0, CARD_WIDTH - 1, CARD_HEIGHT - 1), radius=5, fill=(249, 250, 252, 252), outline=(255, 255, 255, 245), width=2)
-        draw.rectangle((0, 0, 8, CARD_HEIGHT), fill=(*edge, 255))
-        draw.rectangle((116, 0, CARD_WIDTH, 96), fill=(*main, 252))
-        draw.polygon(((CARD_WIDTH - 64, 0), (CARD_WIDTH, 0), (CARD_WIDTH, 64)), fill=(*dark, 235))
-        draw.rectangle((116, 95, CARD_WIDTH, CARD_HEIGHT), fill=(253, 253, 254, 255))
+        body = ((2, 2), (CARD_WIDTH - 2, 2), (CARD_WIDTH - 2, CARD_HEIGHT - 16), (CARD_WIDTH - 16, CARD_HEIGHT - 2), (2, CARD_HEIGHT - 2))
+        shadow = tuple((x + 2, y + 2) for x, y in body)
+        draw.polygon(shadow, fill=(17, 25, 36, 30))
+        draw.polygon(body, fill=(253, 254, 255, 255), outline=(105, 116, 130, 90))
+
+        info_x = JACKET_SIZE + 2
+        draw.rectangle((info_x, 2, CARD_WIDTH - 2, 35), fill=(*main, 255))
+        draw.rectangle((info_x, 35, CARD_WIDTH - 2, 39), fill=(*edge, 255))
+        draw.polygon(((CARD_WIDTH - 47, 2), (CARD_WIDTH - 2, 2), (CARD_WIDTH - 2, 35), (CARD_WIDTH - 25, 35)), fill=(*dark, 248))
 
         if difficulty == 4:
-            for offset in range(0, 42, 16):
-                draw.polygon(((116 + offset, 0), (124 + offset, 0), (116 + offset, 17), (116 + max(0, offset - 8), 17)), fill=(244, 42, 67, 255))
-            draw.rectangle((116, 92, CARD_WIDTH, 96), fill=(244, 42, 67, 255))
+            for offset in range(0, 50, 13):
+                draw.polygon(((info_x + offset, 2), (info_x + offset + 7, 2), (info_x + offset - 7, 35), (info_x + offset - 14, 35)), fill=(245, 47, 67, 170))
         elif difficulty == 5:
-            for offset in range(0, 42, 14):
-                draw.line((116 + offset, 0, 116 + offset - 16, 24), fill=(84, 214, 229, 255), width=5)
+            for offset in range(0, 56, 15):
+                draw.line((info_x + offset, 3, info_x + offset - 14, 35), fill=(63, 213, 227, 210), width=4)
 
         jacket_path = score.get("jacket_path")
         if jacket_path and Path(jacket_path).exists():
-            jacket = _cover(_open_rgba(Path(jacket_path)), (102, 102))
+            jacket = _cover(_open_rgba(Path(jacket_path)), (JACKET_SIZE, JACKET_SIZE))
         else:
-            jacket = Image.new("RGBA", (102, 102), (*dark, 255))
+            jacket = Image.new("RGBA", (JACKET_SIZE, JACKET_SIZE), (*dark, 255))
             placeholder_draw = ImageDraw.Draw(jacket)
-            placeholder_draw.text((51, 51), "NO\nJACKET", font=self.fonts.font(15, latin=True), fill=WHITE, anchor="mm", align="center")
-        card.paste(jacket, (14, 14), _rounded_mask((102, 102), 3))
-        draw.rectangle((12, 12, 118, 118), outline=(255, 255, 255, 245), width=3)
+            placeholder_draw.text((JACKET_SIZE // 2, JACKET_SIZE // 2), "NO\nJACKET", font=self.fonts.font(15, latin=True, weight="black"), fill=WHITE, anchor="mm", align="center")
+        card.alpha_composite(jacket, (2, 2))
+        draw.rectangle((2, 2, JACKET_SIZE + 1, JACKET_SIZE + 1), outline=(25, 33, 45, 170), width=2)
+        draw.rectangle((JACKET_SIZE - 3, 2, JACKET_SIZE + 2, JACKET_SIZE + 1), fill=(*edge, 255))
 
-        info_x = 127
         title = str(score.get("song_name") or f"ID {score.get('id', '-')}")
-        title_width = CARD_WIDTH - info_x - 44
-        title_font = self.fonts.fit(draw, title, title_width, 17, 10)
+        title_left = info_x + 10
+        title_width = CARD_WIDTH - title_left - 42
+        title_font = self.fonts.fit(draw, title, title_width, 16, 10, weight="black")
         title = _ellipsize(draw, title, title_font, title_width)
-        draw.text((info_x, 6), title, font=title_font, fill=WHITE)
-        draw.text((CARD_WIDTH - 8, 7), f"#{index}", font=self.fonts.font(12, latin=True), fill=WHITE, anchor="ra")
-        draw.text((info_x, 34), f"{_as_int(score.get('score')):,}", font=self.fonts.font(25, latin=True), fill=WHITE)
-        draw.text((CARD_WIDTH - 8, 55), f"Ra {_as_float(score.get('rating')):.2f}", font=self.fonts.font(11, latin=True), fill=WHITE, anchor="ra")
+        draw.text((title_left, 8), title, font=title_font, fill=WHITE)
+        draw.text((CARD_WIDTH - 8, 9), f"#{index}", font=self.fonts.font(12, latin=True, weight="black"), fill=WHITE, anchor="ra")
 
-        difficulty_label = str(style["label"])
-        difficulty_key = difficulty_label.lower().replace(" ", "-").replace("'", "")
-        difficulty_asset = self.ui_dir / f"difficulty-{difficulty_key}.png"
-        if difficulty_asset.exists():
-            badge_source = self._ui_image(difficulty_asset.name)
-            if badge_source is not None:
-                badge = badge_source.resize((62, 9), Image.Resampling.LANCZOS)
-                card.alpha_composite(badge, (info_x, 75))
-        else:
-            draw.rounded_rectangle((info_x, 71, info_x + 62, 87), radius=2, fill=(*dark, 235), outline=(255, 255, 255, 115), width=1)
-            draw.text((info_x + 31, 79), difficulty_label, font=self.fonts.fit(draw, difficulty_label, 58, 9, 7), fill=WHITE, anchor="mm")
-        draw.text((info_x + 69, 70), f"Lv.{score.get('level') or '-'}", font=self.fonts.font(11, latin=True), fill=WHITE)
+        score_text = f"{_as_int(score.get('score')):,}"
+        score_font = self.fonts.fit(draw, score_text, CARD_WIDTH - info_x - 16, 29, 23, latin=True, weight="black")
+        draw.text((title_left, 42), score_text, font=score_font, fill=INK)
+
         level_value = score.get("level_value")
         constant = f"{_as_float(level_value):.1f}" if level_value is not None else "-"
-        draw.text((info_x + 113, 70), f"定数 {constant}", font=self.fonts.font(10), fill=WHITE)
+        draw.text((title_left, 78), "定数", font=self.fonts.font(10, weight="semibold"), fill=MUTED)
+        draw.text((title_left + 31, 76), constant, font=self.fonts.font(13, latin=True, weight="black"), fill=INK)
+        draw.line((title_left + 79, 77, title_left + 79, 94), fill=(31, 43, 56, 45), width=1)
+        draw.text((title_left + 91, 78), "Ra", font=self.fonts.font(10, latin=True, weight="semibold"), fill=MUTED)
+        draw.text((title_left + 111, 76), f"{_as_float(score.get('rating')):.2f}", font=self.fonts.font(13, latin=True, weight="black"), fill=INK)
 
-        self._draw_result_badge(card, score, info_x, 99)
-        self._draw_rank_badge(card, str(score.get("rank") or "").lower(), CARD_WIDTH - 102, 99)
+        badge_y = 104
+        self._draw_result_badge(card, score, title_left, badge_y)
+        self._draw_rank_badge(card, str(score.get("rank") or "").lower(), title_left + BADGE_WIDTH + 5, badge_y)
         return card
 
     def _draw_result_badge(self, card: Image.Image, score: dict[str, Any], x: int, y: int) -> None:
@@ -541,7 +565,7 @@ class ChunithmBestRenderer:
         if rank_asset.exists():
             badge_source = self._ui_image(rank_asset.name)
             if badge_source is not None:
-                badge = badge_source.resize((93, 26), Image.Resampling.LANCZOS)
+                badge = badge_source.resize((BADGE_WIDTH, BADGE_HEIGHT), Image.Resampling.LANCZOS)
                 card.alpha_composite(badge, (x, y))
                 return
         self._paste_badge_or_text(card, None, RANK_LABELS.get(rank, rank.upper() or "-"), x, y, kind="rank")
@@ -551,7 +575,7 @@ class ChunithmBestRenderer:
         if asset and asset.exists():
             badge_source = self._ui_image(asset.name)
             if badge_source is not None:
-                badge = badge_source.resize((93, 26), Image.Resampling.LANCZOS)
+                badge = badge_source.resize((BADGE_WIDTH, BADGE_HEIGHT), Image.Resampling.LANCZOS)
                 card.alpha_composite(badge, (x, y))
                 return
         draw = ImageDraw.Draw(card, "RGBA")
@@ -559,18 +583,26 @@ class ChunithmBestRenderer:
             fill, outline, text_color = (229, 244, 255, 255), (75, 172, 222, 255), (28, 87, 128)
         else:
             fill, outline, text_color = (255, 222, 59, 255), (220, 152, 15, 255), (79, 56, 4)
-        draw.rectangle((x, y, x + 92, y + 25), fill=fill, outline=outline, width=1)
-        draw.text((x + 46, y + 13), label, font=self.fonts.fit(draw, label, 88, 11, 7), fill=text_color, anchor="mm")
+        draw.rectangle((x, y, x + BADGE_WIDTH - 1, y + BADGE_HEIGHT - 1), fill=fill, outline=outline, width=1)
+        draw.text(
+            (x + BADGE_WIDTH // 2, y + BADGE_HEIGHT // 2),
+            label,
+            font=self.fonts.fit(draw, label, BADGE_WIDTH - 6, 10, 7, weight="black"),
+            fill=text_color,
+            anchor="mm",
+        )
 
     def _draw_footer(self, canvas: Image.Image, height: int, footer_bot_name: str) -> None:
         draw = ImageDraw.Draw(canvas, "RGBA")
-        footer_y = height - 38
-        draw.line((MARGIN, footer_y - 17, WIDTH - MARGIN, footer_y - 17), fill=(73, 105, 135, 95), width=1)
-        draw.text((MARGIN, footer_y), datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"), font=self.fonts.font(15, latin=True), fill=(63, 78, 99), anchor="lm")
+        footer_y = height - 34
+        draw.line((MARGIN, footer_y - 20, WIDTH - MARGIN, footer_y - 20), fill=(28, 39, 53, 125), width=2)
+        draw.rectangle((MARGIN, footer_y - 25, MARGIN + 62, footer_y - 17), fill=(27, 193, 205, 255))
+        draw.rectangle((MARGIN + 62, footer_y - 25, MARGIN + 99, footer_y - 17), fill=(237, 202, 56, 255))
+        draw.text((MARGIN, footer_y), datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"), font=self.fonts.font(13, latin=True, weight="semibold"), fill=(63, 78, 99), anchor="lm")
         draw.text(
             (WIDTH - MARGIN, footer_y),
             f"Powered By maimai.lxns.net / Generated By {footer_bot_name}",
-            font=self.fonts.font(15, latin=True),
+            font=self.fonts.font(13, latin=True, weight="semibold"),
             fill=(63, 78, 99),
             anchor="rm",
         )
