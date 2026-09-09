@@ -37,9 +37,9 @@
   },
   "default_version": {
     "description": "默认游戏版本",
-    "hint": "调用曲库与收藏品公共接口时使用。落雪文档默认值为 23000。",
+    "hint": "0 跟随落雪服务端默认版本（推荐）。也可填写明确的版本编号；更新旧配置时请将 23000 改为 0，然后执行 /chu update。",
     "type": "int",
-    "default": 23000
+    "default": 0
   },
   "cache_seconds": {
     "description": "曲库缓存时间（秒）",

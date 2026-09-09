@@ -1,9 +1,20 @@
 # 中二节奏落雪查询
 
-基于落雪咖啡屋 LXNS API 的 AstrBot 中二节奏查询插件，提供玩家信息、Rating 构成图片、Recent、单曲成绩、曲库、别名、随机谱面和曲绘链接查询。
+基于落雪咖啡屋 LXNS API 的 AstrBot 中二节奏查询插件，采用国服「中二节奏 2027」中文 Logo，提供玩家信息、Rating 构成图片、成绩统计、冲分目标、Recent、单曲成绩与曲库查询。
+
+## v0.6.0 更新
+
+- B30 和帮助菜单换用国服官方公告中的「中二节奏 2027」中文 Logo，统一紫色、荧光绿主题。
+- B30 扩展为 2000px 宽，优化曲绘、数字层级、长曲名省略、留白、分组说明和徽章比例；JPEG 使用 4:4:4 色彩采样，减少小字与彩色边缘失真。
+- 图片加入本次展示谱面的 SSS+、AJ（含 AJC）、AJC 概览，各组显示数量、Rating 范围和均值。
+- 新增 `/chu stats` 与 `/chu targets`，分别查看完整 Rating 分组统计和距离下一评级最近的五个目标。
+- 公共曲库可跟随落雪服务端默认版本；切换版本后旧缓存自动失效，手动刷新失败时不会误报成功。
+
+已有安装请把配置 `default_version` 改为 `0`，重载插件后执行 `/chu update`。旧配置中显式填写的版本号会保留。落雪尚未上线的新曲与新定数，需要等待服务端更新；视觉主题不会改变 API 返回的版本数据或 Rating 分组。
 
 ## 功能
 
+- `/chu` 与 `/chu help` 使用排版后的图片菜单输出，生成失败时自动回退纯文本帮助。
 - 绑定中二节奏好友码，后续查询可省略好友码。
 - 查询玩家资料：昵称、Rating、等级、OVER POWER、称号、角色、名牌、头像和同步时间；好友码与游玩次数默认隐藏。
 - 生成 Rating 构成图片：Best 30、Selection 10、New Best 20，仅读取本地曲绘与玩家收藏品素材。
@@ -55,7 +66,7 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 | `allow_custom_endpoints` | `false` | 是否允许自定义 API/素材地址。默认仅允许落雪官方 HTTPS 域名。 |
 | `asset_sync_concurrency` | `1` | 素材更新并发数，范围 1-4。默认单并发以降低素材站压力。 |
 | `asset_sync_delay` | `0.5` | 主动更新素材时每个任务的请求间隔，单位秒。 |
-| `default_version` | `23000` | 曲库接口使用的默认版本。 |
+| `default_version` | `0` | 0 不传版本参数，跟随落雪服务端默认版本；正整数指定版本，影响曲库与收藏品同步。 |
 | `cache_seconds` | `86400` | 曲库和别名本地缓存时间，单位秒。 |
 | `timeout_seconds` | `15` | API 请求超时时间，单位秒。 |
 | `default_recent_count` | `10` | `/chu recent` 默认展示数量，范围 1-50。 |
@@ -75,13 +86,15 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 
 | 指令 | 功能 |
 | --- | --- |
-| `/chu help` | 查看帮助菜单。 |
+| `/chu`、`/chu help` | 查看图片帮助菜单。 |
 | `/chu bind <好友码>` | 绑定自己的中二节奏好友码。 |
 | `/chu unbind` | 解除当前账号绑定。 |
 | `/chu me` | 查看当前绑定玩家资料。 |
 | `/chu me <好友码>` | 查看指定好友码玩家资料。 |
 | `/chu me qq <QQ号>` | 通过落雪 QQ 绑定查询玩家资料。 |
 | `/chu b30 [好友码]` | 生成 Rating 构成图片。未写好友码时使用绑定。 |
+| `/chu stats [好友码]` | 统计 Best 30 / Selection 10 / New 20 的数量、Rating 均值与范围，以及去重后的 SSS+ / FC / AJ / AJC 数量。 |
+| `/chu targets [好友码]` | 列出当前 Rating 构成中距下一评级分差最小的五张谱面。支持中文别名 `目标`、`冲分`。 |
 | `/chu recent [数量] [好友码]` | 查询 Recent，数量范围 1-50。 |
 | `/chu score <曲名或ID> [难度] [好友码]` | 查询单曲成绩。未写难度时展示全难度缓存成绩。 |
 | `/chu song <曲名/别名/ID>` | 查询曲库歌曲详情。 |
@@ -116,6 +129,8 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 /chu bind 888888888888888
 /chu me
 /chu b30
+/chu stats
+/chu targets
 /chu recent 20
 /chu score 宛城、炎上！！ mas
 /chu score 1234 ult 888888888888888
@@ -137,6 +152,8 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 - 曲库和别名会缓存到本地，默认 24 小时过期；需要立即更新时使用 `/chu update`。
 - B30 严格使用落雪 API 返回的 `bests`、`selections`、`new_bests` 分组，不在渲染时重新归类歌曲。
 - AJ、AJC、FULL COMBO、CLEAR 等标记只读取落雪成绩字段，不通过分数推断。
+- 图片顶部概览只统计当前展示的谱面；`/chu stats` 统计 API 返回的完整分组，并按歌曲 ID 与难度去重。两者均不代表全曲库完成率。
+- `/chu targets` 仅分析本次 API 返回的 Rating 构成，不包含未返回的曲目；按下一评级分差排序，不预测实际上分难度或总 Rating 增量。已达到 SSS+ 的谱面不再推荐，WORLD'S END 不参与分析。
 - B30 生成过程中只读取 `assets/` 本地文件，不会按玩家成绩向素材站请求曲绘或角色。
 - 所有查询结果都会引用用户的原消息；单曲详情、单曲成绩、别名和随机谱面会优先附带本地曲绘。
 
@@ -159,6 +176,7 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 - 为避免对落雪素材站造成压力，同步采用低并发、请求间隔和失败退避；后续更新会跳过已有有效文件。
 - 首次全量同步需要下载较多文件，可能持续较长时间；同步在后台进行，不阻塞日常查询。
 - 评级、CLEAR、FULL COMBO、AJ/AJC 和 CLASS 等固定 UI 素材来自 [Lxns-Network/maimai-prober-frontend](https://github.com/Lxns-Network/maimai-prober-frontend)。
+- 国服中文 Logo 来自[中二节奏官方 2027 更新公告](https://www.bilibili.com/opus/1241473035844714514)。仓库保留完整原始宣传图，渲染时只使用中文 Logo 所在区域。
 - 图片字体使用 Google Fonts 的 Noto Sans SC，按 SIL Open Font License 1.1 分发。
 - CHUNITHM 及相关游戏素材的著作权归原权利人所有；本插件仅用于非商业查询结果展示。
 
@@ -189,6 +207,17 @@ pip install -r data/plugins/astrbot_plugin_chunithm_lxns/requirements.txt
 ### B30 显示 NO JACKET 或没有角色头像
 
 先让 AstrBot 管理员执行 `/chu assets status` 检查本地素材库，再执行 `/chu assets update all`。更新在后台运行，可继续用 `/chu assets status` 查看进度。B30 不会自行联网补图。
+
+## 开发与预览
+
+无需 Token 或真实玩家资料，可离线运行：
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/render_preview.py --output generated/b30-preview.jpg
+```
+
+脚本同时生成 B30 和帮助菜单预览；成绩、分组和玩家均为明确标注的示例数据。可用 `--catalog <公开曲库.json> --assets <本地曲绘目录>` 代入真实曲名及曲绘，目录中文件命名为 `<歌曲ID>.png`。预览脚本不联网，不会读取账号密钥或玩家绑定。
 
 ## 相关链接
 

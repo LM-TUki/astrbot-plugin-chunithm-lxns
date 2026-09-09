@@ -167,6 +167,8 @@ class AssetStoreTests(unittest.TestCase):
         self.assertNotIn('^/?chu', source)
         self.assertIn("Comp.Reply(id=message_id)", source)
         self.assertIn("Comp.Image.fromFileSystem", source)
+        self.assertIn("return await self._render_help_menu()", source)
+        self.assertIn('f"help-{int(time.time())}-{uuid4().hex[:8]}.png"', source)
         for command in ("_cmd_song", "_cmd_score", "_cmd_alias", "_cmd_random"):
             tree = ast.parse(source)
             function = next(node for node in ast.walk(tree) if getattr(node, "name", None) == command)

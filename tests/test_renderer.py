@@ -107,6 +107,63 @@ def _jackets(directory: Path) -> dict[int, Path]:
 
 
 class RendererTests(unittest.TestCase):
+    def test_chinese_logo_uses_official_source_region(self) -> None:
+        renderer = renderer_module.ChunithmBestRenderer(PLUGIN_DIR / "static")
+        logo = renderer._ui_image(renderer_module.LOGO_FILE)
+        self.assertIsNotNone(logo)
+        with Image.open(PLUGIN_DIR / "static" / "ui" / renderer_module.LOGO_FILE) as original:
+            expected = original.convert("RGBA").crop(renderer_module.LOGO_CROP)
+            self.assertEqual(logo.tobytes(), expected.tobytes())
+        self.assertFalse((PLUGIN_DIR / "static" / "ui" / "logo-2026.png").exists())
+
+    def test_header_hides_private_fields_and_unknown_rating(self) -> None:
+        renderer = renderer_module.ChunithmBestRenderer(PLUGIN_DIR / "static")
+        canvas = renderer._build_background(550)
+        player = {"friend_code": 888888888888888, "total_play_count": 43210}
+        with patch.object(ImageDraw.ImageDraw, "text") as text:
+            renderer._draw_player_header(canvas, player, {}, show_friend_code=False, show_play_count=False)
+        labels = [str(call.args[1]) for call in text.call_args_list]
+        self.assertNotIn("888888888888888", " ".join(labels))
+        self.assertNotIn("43210", " ".join(labels))
+        self.assertIn("--", labels)
+
+    def test_full_chart_count_renders_once_in_api_order(self) -> None:
+        player, _, scores = _fixture()
+        groups = [(title, [{**scores[key][0], "id": offset + index} for index in range(count)]) for title, key, count, offset in (("BEST 30", "bests", 30, 0), ("SELECTION 10", "selections", 10, 30), ("NEW 20", "new_bests", 20, 40))]
+        renderer = renderer_module.ChunithmBestRenderer(PLUGIN_DIR / "static")
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(renderer, "_draw_card", wraps=renderer._draw_card) as card:
+                output = renderer.render(player, groups, Path(directory) / "full.jpg", asset_paths={})
+            self.assertEqual([call.args[0]["id"] for call in card.call_args_list], list(range(60)))
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (2000, 2968))
+
+    def test_help_renderer_renders_complete_command_menu(self) -> None:
+        commands = {
+            command
+            for section in (
+                renderer_module.HELP_ACCOUNT_COMMANDS,
+                renderer_module.HELP_SONG_COMMANDS,
+                renderer_module.HELP_ADMIN_COMMANDS,
+            )
+            for command, _ in section
+        }
+        self.assertEqual(len(commands), 15)
+        self.assertIn("/chu stats [好友码]", commands)
+        self.assertIn("/chu targets [好友码]", commands)
+        self.assertIn("/chu b30 [好友码]", commands)
+        self.assertIn("/chu random [等级] [难度]", commands)
+        self.assertIn("/chu assets status", commands)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "chu-help.png"
+            renderer = renderer_module.ChunithmHelpRenderer(PLUGIN_DIR / "static")
+            result = renderer.render(output, footer_bot_name="EmuBot")
+            with Image.open(result) as image:
+                self.assertEqual(image.size, (renderer_module.HELP_WIDTH, renderer_module.HELP_HEIGHT))
+                self.assertEqual(image.mode, "RGB")
+                self.assertIsNotNone(image.getbbox())
+
     def test_long_card_title_is_ellipsized_to_available_width(self) -> None:
         renderer = renderer_module.ChunithmBestRenderer(PLUGIN_DIR / "static")
         image = Image.new("RGBA", (300, 80), "white")

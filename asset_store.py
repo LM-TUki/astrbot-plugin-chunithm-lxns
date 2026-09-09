@@ -5,9 +5,10 @@ import io
 import json
 import re
 import socket
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable
+from typing import TYPE_CHECKING, Any
 
 from PIL import Image
 
@@ -119,7 +120,11 @@ class LocalAssetStore:
 
     @staticmethod
     def valid_image(path: Path) -> bool:
-        if not path.exists() or not path.is_file() or not 64 <= path.stat().st_size <= MAX_IMAGE_BYTES:
+        if (
+            not path.exists()
+            or not path.is_file()
+            or not 64 <= path.stat().st_size <= MAX_IMAGE_BYTES
+        ):
             return False
         try:
             with Image.open(path) as image:
@@ -181,7 +186,9 @@ class PublicAssetSynchronizer:
         kinds: Iterable[str],
         progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        requested_kinds = tuple(dict.fromkeys(kind for kind in kinds if kind in SYNC_KINDS))
+        requested_kinds = tuple(
+            dict.fromkeys(kind for kind in kinds if kind in SYNC_KINDS)
+        )
         if not requested_kinds:
             raise ValueError("No supported asset kind requested")
 
@@ -198,7 +205,9 @@ class PublicAssetSynchronizer:
 
         import aiohttp
 
-        timeout = aiohttp.ClientTimeout(total=self.timeout_seconds, connect=min(self.timeout_seconds, 10))
+        timeout = aiohttp.ClientTimeout(
+            total=self.timeout_seconds, connect=min(self.timeout_seconds, 10)
+        )
         connector = aiohttp.TCPConnector(
             family=socket.AF_INET,
             limit=self.concurrency,
@@ -264,14 +273,20 @@ class PublicAssetSynchronizer:
             payload = await self._public_json(
                 session,
                 "chunithm/song/list",
-                params={"version": self.version, "notes": "false"},
+                params={
+                    "notes": "false",
+                    **({"version": self.version} if self.version else {}),
+                },
             )
             for song in payload.get("songs", []):
                 if self.store.normalize_id(song.get("id")) is not None:
                     plan.append(("jacket", int(song["id"])))
                 for difficulty in song.get("difficulties") or []:
                     origin_id = difficulty.get("origin_id")
-                    if difficulty.get("difficulty") == 5 and self.store.normalize_id(origin_id) is not None:
+                    if (
+                        difficulty.get("difficulty") == 5
+                        and self.store.normalize_id(origin_id) is not None
+                    ):
                         plan.append(("jacket", int(origin_id)))
         for kind in kinds:
             if kind not in COLLECTION_KEYS:
@@ -279,10 +294,13 @@ class PublicAssetSynchronizer:
             payload = await self._public_json(
                 session,
                 f"chunithm/{kind}/list",
-                params={"version": self.version},
+                params={"version": self.version} if self.version else {},
             )
             for collection in payload.get(COLLECTION_KEYS[kind], []):
-                if kind == "trophy" and str(collection.get("color") or "").casefold() != "image":
+                if (
+                    kind == "trophy"
+                    and str(collection.get("color") or "").casefold() != "image"
+                ):
                     continue
                 if self.store.normalize_id(collection.get("id")) is not None:
                     plan.append((kind, int(collection["id"])))
@@ -305,7 +323,9 @@ class PublicAssetSynchronizer:
             payload = json.loads(body)
         if isinstance(payload, dict) and "success" in payload:
             if not payload.get("success"):
-                raise RuntimeError(str(payload.get("message") or "Public LXNS API request failed"))
+                raise RuntimeError(
+                    str(payload.get("message") or "Public LXNS API request failed")
+                )
             payload = payload.get("data")
         if not isinstance(payload, dict):
             raise RuntimeError("Public LXNS API returned an invalid payload")
@@ -324,7 +344,9 @@ class PublicAssetSynchronizer:
             try:
                 async with session.get(url, allow_redirects=False) as response:
                     if response.status == 200:
-                        content_length = int(response.headers.get("Content-Length") or 0)
+                        content_length = int(
+                            response.headers.get("Content-Length") or 0
+                        )
                         if content_length > MAX_IMAGE_BYTES:
                             return False
                         try:
@@ -337,17 +359,23 @@ class PublicAssetSynchronizer:
                         return False
                     if response.status == 429 or response.status >= 500:
                         retry_after = response.headers.get("Retry-After")
-                        delay = float(retry_after) if retry_after and retry_after.isdigit() else 2 ** attempt
+                        delay = (
+                            float(retry_after)
+                            if retry_after and retry_after.isdigit()
+                            else 2**attempt
+                        )
                         await asyncio.sleep(min(delay, 30))
                         continue
                     return False
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
                 if attempt == 2:
                     return False
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(2**attempt)
         return False
 
     @staticmethod
-    def _notify(progress: Callable[[dict[str, Any]], None] | None, state: dict[str, Any]) -> None:
+    def _notify(
+        progress: Callable[[dict[str, Any]], None] | None, state: dict[str, Any]
+    ) -> None:
         if progress:
             progress(dict(state))

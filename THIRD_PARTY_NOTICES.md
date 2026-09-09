@@ -1,5 +1,21 @@
 # Third-Party Notices
 
+## CHUNITHM China 2027 Branding
+
+`static/ui/branding-2027.png` is the unmodified promotional artwork linked in
+the official CHUNITHM China announcement, published on August 28, 2026:
+
+https://www.bilibili.com/opus/1241473035844714514
+
+Original image:
+https://i0.hdslb.com/bfs/new_dyn/490248ae50174180e7677ef4d6a7805f1311127373.png
+
+The renderer uses only the Chinese `中二节奏 2027` logo region at
+`(1760, 2470, 2450, 2855)` in the original 3542 x 4377 artwork. It does not
+substitute the international X-VERSE-X logo. Game branding and artwork remain
+the property of SEGA and their respective rights holders; they are not covered
+by the source code license. The region retains the SEGA attribution.
+
 ## LXNS Frontend UI Assets
 
 The fixed CHUNITHM rank, result and class-emblem images under `static/ui`

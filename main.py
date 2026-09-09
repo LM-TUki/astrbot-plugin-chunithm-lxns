@@ -22,11 +22,14 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
 from .asset_store import LocalAssetStore, PublicAssetSynchronizer
-from .renderer import ChunithmBestRenderer, enrich_scores_with_catalog
-
+from .renderer import (
+    ChunithmBestRenderer,
+    ChunithmHelpRenderer,
+    enrich_scores_with_catalog,
+)
 
 PLUGIN_NAME = "astrbot_plugin_chunithm_lxns"
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.6.0"
 DATA_DIR = Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
 MAX_COMMAND_LENGTH = 512
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -280,7 +283,9 @@ class ChunithmLxnsPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
         self.config = config or {}
-        self.allow_custom_endpoints = _safe_bool(self.config.get("allow_custom_endpoints"), False)
+        self.allow_custom_endpoints = _safe_bool(
+            self.config.get("allow_custom_endpoints"), False
+        )
         self.api_base = _validate_base_url(
             self.config.get("api_base", "https://maimai.lxns.net/api/v0"),
             official_host=OFFICIAL_API_HOST,
@@ -292,7 +297,7 @@ class ChunithmLxnsPlugin(Star):
             allow_custom=self.allow_custom_endpoints,
         )
         self.token = str(self.config.get("lxns_token", "") or "").strip()
-        self.default_version = _safe_int(self.config.get("default_version"), 23000)
+        self.default_version = max(0, _safe_int(self.config.get("default_version"), 0))
         self.cache_seconds = max(
             _safe_int(self.config.get("cache_seconds"), 24 * 60 * 60),
             60,
@@ -314,12 +319,16 @@ class ChunithmLxnsPlugin(Star):
         self.render_b30_image = _safe_bool(self.config.get("render_b30_image"), True)
         self.show_friend_code = _safe_bool(self.config.get("show_friend_code"), False)
         self.show_play_count = _safe_bool(self.config.get("show_play_count"), False)
-        self.footer_bot_name = str(self.config.get("footer_bot_name", "EmuBot") or "EmuBot").strip()
+        self.footer_bot_name = str(
+            self.config.get("footer_bot_name", "EmuBot") or "EmuBot"
+        ).strip()
         self.asset_sync_concurrency = max(
             min(_safe_int(self.config.get("asset_sync_concurrency"), 1), 4),
             1,
         )
-        self.asset_sync_delay = max(_safe_float(self.config.get("asset_sync_delay")) or 0.5, 0.05)
+        self.asset_sync_delay = max(
+            _safe_float(self.config.get("asset_sync_delay")) or 0.5, 0.05
+        )
 
         self.bindings_file = DATA_DIR / "bindings.json"
         self.catalog_file = DATA_DIR / "catalog_cache.json"
@@ -335,6 +344,7 @@ class ChunithmLxnsPlugin(Star):
         self.asset_update_state: dict[str, Any] = {"status": "idle"}
         self.asset_store = LocalAssetStore(self.asset_cache_dir)
         self.renderer = ChunithmBestRenderer(self.static_dir)
+        self.help_renderer = ChunithmHelpRenderer(self.static_dir)
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.asset_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -360,7 +370,9 @@ class ChunithmLxnsPlugin(Star):
         try:
             message = event.get_message_str().strip()
             if len(message) > MAX_COMMAND_LENGTH:
-                raise UserFacingError(f"命令过长，最多允许 {MAX_COMMAND_LENGTH} 个字符。")
+                raise UserFacingError(
+                    f"命令过长，最多允许 {MAX_COMMAND_LENGTH} 个字符。"
+                )
             result = await self._dispatch(event, message)
         except UserFacingError as exc:
             result = f"中二节奏查询失败：{exc}"
@@ -385,13 +397,15 @@ class ChunithmLxnsPlugin(Star):
         if chain:
             yield event.chain_result(chain).stop_event()
 
-    async def _dispatch(self, event: AstrMessageEvent, message: str) -> str | Path | BotResponse:
+    async def _dispatch(
+        self, event: AstrMessageEvent, message: str
+    ) -> str | Path | BotResponse:
         rest = self._strip_prefix(message)
         cmd, args = _split_first(rest)
         cmd_key = cmd.strip().lower()
 
         if not cmd_key or cmd_key in {"help", "帮助", "h", "菜单"}:
-            return self._help_text()
+            return await self._render_help_menu()
         if cmd_key in {"bind", "绑定"}:
             return await self._cmd_bind(event, args)
         if cmd_key in {"unbind", "解绑"}:
@@ -402,6 +416,17 @@ class ChunithmLxnsPlugin(Star):
             return await self._cmd_b30(event, args)
         if cmd_key in {"b30", "best30", "bests"}:
             return await self._cmd_b30(event, args)
+        if cmd_key in {"stats", "统计", "targets", "目标", "冲分"}:
+            explicit_code, rest = self._pop_friend_code(args)
+            if rest:
+                raise UserFacingError(
+                    "用法：/chu stats [好友码] 或 /chu targets [好友码]"
+                )
+            code = await self._resolve_friend_code(event, explicit_code)
+            bests = await self._api_rating_bests(code)
+            return self._format_rating_analysis(
+                bests, targets=cmd_key not in {"stats", "统计"}
+            )
         if cmd_key in {"recent", "recents", "r10", "r", "最近"}:
             return await self._cmd_recent(event, args)
         if cmd_key in {"score", "scores", "成绩", "单曲"}:
@@ -430,6 +455,23 @@ class ChunithmLxnsPlugin(Star):
             raise UserFacingError("命令必须以 /chu 开头。")
         return str(match.group(1) or "").strip()
 
+    async def _render_help_menu(self) -> Path | str:
+        output_path = (
+            self.generated_dir / f"help-{int(time.time())}-{uuid4().hex[:8]}.png"
+        )
+        try:
+            async with self.render_semaphore:
+                await asyncio.to_thread(
+                    self.help_renderer.render,
+                    output_path,
+                    footer_bot_name=self.footer_bot_name,
+                )
+            self._cleanup_generated_images()
+            return output_path
+        except Exception as exc:
+            logger.warning(f"中二节奏帮助图生成失败，已回退文本：{exc}")
+            return self._help_text()
+
     def _help_text(self) -> str:
         return (
             "中二节奏查询 /chu 帮助\n"
@@ -441,6 +483,8 @@ class ChunithmLxnsPlugin(Star):
             "\n"
             "成绩：\n"
             "/chu b30 [好友码] 查询 Rating 构成\n"
+            "/chu stats [好友码] 查看 Rating 分组统计\n"
+            "/chu targets [好友码] 查看下一评级的冲分目标\n"
             "/chu recent [数量] [好友码] 查询 Recent\n"
             "/chu score <曲名或ID> [难度] [好友码] 查询单曲成绩\n"
             "\n"
@@ -514,7 +558,9 @@ class ChunithmLxnsPlugin(Star):
 
         player_task = asyncio.create_task(self._api_player(code))
         bests_task = asyncio.create_task(self._api_rating_bests(code))
-        catalog_task = asyncio.create_task(self._get_catalog()) if self.render_b30_image else None
+        catalog_task = (
+            asyncio.create_task(self._get_catalog()) if self.render_b30_image else None
+        )
         try:
             bests = await bests_task
         except Exception:
@@ -547,9 +593,13 @@ class ChunithmLxnsPlugin(Star):
 
         return self._format_b30_text(player, bests, code)
 
-    def _format_b30_text(self, player: dict[str, Any], bests: dict[str, Any], code: str) -> str:
+    def _format_b30_text(
+        self, player: dict[str, Any], bests: dict[str, Any], code: str
+    ) -> str:
 
-        title = self._player_title(player, code, include_friend_code=self.show_friend_code)
+        title = self._player_title(
+            player, code, include_friend_code=self.show_friend_code
+        )
         lines = [f"{title} Rating 构成"]
         if player:
             summary = self._player_summary_line(player)
@@ -575,18 +625,127 @@ class ChunithmLxnsPlugin(Star):
             self._format_score_section(
                 "New Best 20",
                 bests.get("new_bests", []),
-                min(self.b30_show_count, 20),
+                20,
             ),
         )
         if len(lines) <= 2:
             lines.append("落雪没有返回 Rating 构成数据。")
         return "\n".join(lines)
 
+    def _format_rating_analysis(
+        self, bests: dict[str, Any], *, targets: bool = False
+    ) -> str:
+        """Summarize returned groups or rank milestones without estimating rating gain.
+
+        Args:
+            bests: The rating-composition response from LXNS.
+            targets: Whether to list nearby score milestones instead of statistics.
+
+        Returns:
+            A report scoped to the returned charts, without account identifiers.
+        """
+        groups = (
+            ("Best 30", "bests"),
+            ("Selection 10", "selections"),
+            ("New Best 20", "new_bests"),
+        )
+        unique: dict[tuple[int, int], dict[str, Any]] = {}
+        lines = ["中二节奏 2027 · Rating 分组统计"]
+        for title, key in groups:
+            rows = bests.get(key) or []
+            if not rows:
+                lines.append(f"{title}：暂无记录")
+                continue
+            ratings = [
+                value
+                for row in rows
+                if (value := _safe_float(row.get("rating"))) is not None
+            ]
+            lines.append(f"{title}：{len(rows)} 张谱面")
+            if ratings:
+                lines.append(
+                    f"  均值 {sum(ratings) / len(ratings):.4f} · 范围 {min(ratings):.2f}–{max(ratings):.2f}"
+                )
+            for row in rows:
+                chart = (
+                    _safe_int(row.get("id"), -1),
+                    _safe_int(row.get("level_index"), -1),
+                )
+                if chart[0] < 0 or not 0 <= chart[1] <= 4:
+                    continue
+                if chart not in unique or _safe_int(row.get("score"), -1) > _safe_int(
+                    unique[chart].get("score"), -1
+                ):
+                    unique[chart] = row
+        if not unique:
+            return "落雪没有返回可分析的 Rating 构成数据，请先同步成绩。"
+
+        rows = list(unique.values())
+        if not targets:
+            ajc = sum(row.get("full_combo") == "alljusticecritical" for row in rows)
+            aj = sum(
+                row.get("full_combo") in {"alljustice", "alljusticecritical"}
+                for row in rows
+            )
+            fc = sum(row.get("full_combo") in FULL_COMBO_NAMES for row in rows)
+            sssp = sum(str(row.get("rank") or "").lower() == "sssp" for row in rows)
+            lines.extend(
+                (
+                    "",
+                    f"去重后 {len(rows)} 张：SSS+ {sssp} · FC（含 AJ）{fc} · AJ（含 AJC）{aj} · AJC {ajc}",
+                    "仅统计本次 API 返回的 Rating 构成，不代表全曲库完成率。",
+                )
+            )
+            return "\n".join(lines)
+
+        milestones = (
+            (975000, "S"),
+            (990000, "S+"),
+            (1000000, "SS"),
+            (1005000, "SS+"),
+            (1007500, "SSS"),
+            (1009000, "SSS+"),
+        )
+        candidates = []
+        for row in rows:
+            score = _safe_int(row.get("score"), -1)
+            if score < 0 or score > 1010000:
+                continue
+            next_rank = next(
+                (
+                    (threshold, label)
+                    for threshold, label in milestones
+                    if threshold > score
+                ),
+                None,
+            )
+            if next_rank:
+                threshold, label = next_rank
+                candidates.append((threshold - score, threshold, label, row))
+        candidates.sort(
+            key=lambda item: (item[0], -item[1], _safe_int(item[3].get("id"), 0))
+        )
+        lines = [
+            "中二节奏 2027 · 下一评级目标",
+            "按距下一评级所需分数排序，仅分析当前 Rating 构成。",
+        ]
+        if not candidates:
+            lines.append("当前返回的有效成绩已全部达到 SSS+，没有下一评级目标。")
+        for index, (gap, threshold, label, row) in enumerate(candidates[:5], 1):
+            title = _truncate_display(row.get("song_name") or f"ID {row.get('id')}", 36)
+            difficulty = LEVEL_SHORT.get(_safe_int(row.get("level_index"), -1), "?")
+            lines.append(f"{index}. {title} [{difficulty}] · ID {row.get('id')}")
+            lines.append(f"   → {label} {threshold:,}（还差 {gap:,} 分）")
+        lines.append("分差不等于上分难度或总 Rating 增量；AJ / AJC 以实际判定为准。")
+        return "\n".join(lines)
+
     async def _cmd_recent(self, event: AstrMessageEvent, args: str) -> str:
         count, rest = self._pop_count(args, self.default_recent_count)
         explicit_code, rest = self._pop_friend_code(rest)
         if rest:
-            raise UserFacingError("Recent 只接受数量和好友码。用法：/chu recent [数量] [好友码]")
+            raise UserFacingError(
+                "Recent 只接受数量和好友码。用法：/chu recent [数量] [好友码]"
+            )
         count = max(1, min(count, 50))
         code = await self._resolve_friend_code(event, explicit_code)
 
@@ -594,7 +753,9 @@ class ChunithmLxnsPlugin(Star):
         player_name = ""
         try:
             player = await self._api_player(code)
-            player_name = self._player_title(player, code, include_friend_code=self.show_friend_code)
+            player_name = self._player_title(
+                player, code, include_friend_code=self.show_friend_code
+            )
         except UserFacingError:
             player_name = f"好友码 {code}" if self.show_friend_code else "未知玩家"
 
@@ -615,7 +776,9 @@ class ChunithmLxnsPlugin(Star):
         params = self._song_query_params(song, query)
 
         if level_index is not None:
-            score = await self._api_best_score(code, {**params, "level_index": level_index})
+            score = await self._api_best_score(
+                code, {**params, "level_index": level_index}
+            )
             lines = [
                 f"{self._song_display_name(song, query)} 单曲最佳",
                 self._format_score_line(score, include_title=False),
@@ -682,9 +845,14 @@ class ChunithmLxnsPlugin(Star):
         candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for song in catalog.get("songs", []):
             for diff in song.get("difficulties") or []:
-                if difficulty_filter is not None and diff.get("difficulty") != difficulty_filter:
+                if (
+                    difficulty_filter is not None
+                    and diff.get("difficulty") != difficulty_filter
+                ):
                     continue
-                if level_filter and not self._difficulty_matches_level(diff, level_filter):
+                if level_filter and not self._difficulty_matches_level(
+                    diff, level_filter
+                ):
                     continue
                 candidates.append((song, diff))
 
@@ -698,7 +866,9 @@ class ChunithmLxnsPlugin(Star):
             f"艺术家：{_truncate_display(song.get('artist') or '-', 46)} / BPM：{song.get('bpm', '-')}",
         ]
         lines.append(self._format_difficulty_detail(diff))
-        jacket_id = diff.get("origin_id") if diff.get("difficulty") == 5 else song.get("id")
+        jacket_id = (
+            diff.get("origin_id") if diff.get("difficulty") == 5 else song.get("id")
+        )
         jacket = self.asset_store.find("jacket", jacket_id) or self._song_jacket(song)
         if jacket is None:
             lines.append("本地素材库中暂无曲绘，请联系管理员更新公共素材。")
@@ -709,7 +879,6 @@ class ChunithmLxnsPlugin(Star):
         if not query:
             return "用法：/chu jacket <曲名/ID>"
         song = await self._resolve_one_song(query)
-        song_id = song.get("id")
         local_path = self._song_jacket(song)
         if local_path:
             return local_path
@@ -825,7 +994,9 @@ class ChunithmLxnsPlugin(Star):
             "failed": "失败",
             "cancelled": "已取消",
         }
-        status = labels.get(str(state.get("status")), str(state.get("status") or "空闲"))
+        status = labels.get(
+            str(state.get("status")), str(state.get("status") or "空闲")
+        )
         lines = [
             "中二节奏本地素材库",
             f"状态：{status}",
@@ -851,7 +1022,9 @@ class ChunithmLxnsPlugin(Star):
             timeout = aiohttp.ClientTimeout(total=self.timeout_seconds, connect=8)
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
-                connector=aiohttp.TCPConnector(family=socket.AF_INET, limit=16, ttl_dns_cache=300),
+                connector=aiohttp.TCPConnector(
+                    family=socket.AF_INET, limit=16, ttl_dns_cache=300
+                ),
                 trust_env=False,
                 cookie_jar=aiohttp.DummyCookieJar(),
                 headers={"User-Agent": f"{PLUGIN_NAME}/{PLUGIN_VERSION} AstrBot"},
@@ -896,11 +1069,16 @@ class ChunithmLxnsPlugin(Star):
                 try:
                     payload = json.loads(text) if text else {}
                 except json.JSONDecodeError as exc:
-                    raise LxnsApiError(f"落雪 API 返回了非 JSON 响应（HTTP {resp.status}）", resp.status) from exc
+                    raise LxnsApiError(
+                        f"落雪 API 返回了非 JSON 响应（HTTP {resp.status}）",
+                        resp.status,
+                    ) from exc
 
                 if isinstance(payload, dict) and "success" in payload:
                     if not payload.get("success") or resp.status >= 400:
-                        message = _safe_remote_message(payload.get("message") or f"HTTP {resp.status}", self.token)
+                        message = _safe_remote_message(
+                            payload.get("message") or f"HTTP {resp.status}", self.token
+                        )
                         raise LxnsApiError(message, resp.status)
                     return payload.get("data")
 
@@ -925,12 +1103,20 @@ class ChunithmLxnsPlugin(Star):
         data = await self._request("GET", f"chunithm/player/{friend_code}/bests")
         return data or {}
 
-    async def _api_song_scores(self, friend_code: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-        data = await self._request("GET", f"chunithm/player/{friend_code}/bests", params=params)
+    async def _api_song_scores(
+        self, friend_code: str, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        data = await self._request(
+            "GET", f"chunithm/player/{friend_code}/bests", params=params
+        )
         return data or []
 
-    async def _api_best_score(self, friend_code: str, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("GET", f"chunithm/player/{friend_code}/best", params=params)
+    async def _api_best_score(
+        self, friend_code: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._request(
+            "GET", f"chunithm/player/{friend_code}/best", params=params
+        )
 
     async def _api_recents(self, friend_code: str) -> list[dict[str, Any]]:
         data = await self._request("GET", f"chunithm/player/{friend_code}/recents")
@@ -944,7 +1130,10 @@ class ChunithmLxnsPlugin(Star):
     ) -> Path:
         section_specs = [
             ("BEST 30", list(bests.get("bests") or [])[: self.b30_show_count]),
-            ("SELECTION 10", list(bests.get("selections") or [])[: self.selection_show_count]),
+            (
+                "SELECTION 10",
+                list(bests.get("selections") or [])[: self.selection_show_count],
+            ),
             ("NEW 20", list(bests.get("new_bests") or [])[:20]),
         ]
         if not any(rows for _, rows in section_specs):
@@ -986,7 +1175,9 @@ class ChunithmLxnsPlugin(Star):
         ]
         self._validate_rating_sections(sections)
 
-        output_path = self.generated_dir / f"b30-{int(time.time())}-{uuid4().hex[:8]}.jpg"
+        output_path = (
+            self.generated_dir / f"b30-{int(time.time())}-{uuid4().hex[:8]}.jpg"
+        )
         async with self.render_semaphore:
             await asyncio.to_thread(
                 self.renderer.render,
@@ -1002,7 +1193,9 @@ class ChunithmLxnsPlugin(Star):
         return output_path
 
     @staticmethod
-    def _validate_rating_sections(sections: list[tuple[str, list[dict[str, Any]]]]) -> None:
+    def _validate_rating_sections(
+        sections: list[tuple[str, list[dict[str, Any]]]],
+    ) -> None:
         seen: dict[tuple[int, int], str] = {}
         for title, rows in sections:
             for score in rows:
@@ -1013,11 +1206,15 @@ class ChunithmLxnsPlugin(Star):
                 if key[0] < 0 or key[1] < 0:
                     raise ValueError(f"{title} 包含无效成绩记录：{score}")
                 if key in seen:
-                    raise ValueError(f"Rating 分组重复谱面：{key}（{seen[key]} / {title}）")
+                    raise ValueError(
+                        f"Rating 分组重复谱面：{key}（{seen[key]} / {title}）"
+                    )
                 seen[key] = title
 
     def _local_jackets(self, song_ids: set[int]) -> dict[int, Path]:
-        return self.asset_store.find_many("jacket", sorted(song_id for song_id in song_ids if song_id >= 0))
+        return self.asset_store.find_many(
+            "jacket", sorted(song_id for song_id in song_ids if song_id >= 0)
+        )
 
     def _song_jacket(self, song: dict[str, Any]) -> Path | None:
         candidate_ids = [song.get("id")]
@@ -1056,12 +1253,13 @@ class ChunithmLxnsPlugin(Star):
         if not self.generated_dir.exists():
             return
         cutoff = _now() - max_age_seconds
-        for path in self.generated_dir.glob("b30-*.jpg"):
-            try:
-                if path.stat().st_mtime < cutoff:
-                    path.unlink()
-            except OSError:
-                pass
+        for pattern in ("b30-*.jpg", "help-*.png"):
+            for path in self.generated_dir.glob(pattern):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink()
+                except OSError:
+                    pass
 
     async def _get_catalog(self, force: bool = False) -> dict[str, Any]:
         async with self.catalog_lock:
@@ -1078,13 +1276,21 @@ class ChunithmLxnsPlugin(Star):
                     self._request(
                         "GET",
                         "chunithm/song/list",
-                        params={"version": self.default_version, "notes": "true"},
+                        params={
+                            "notes": "true",
+                            **(
+                                {"version": self.default_version}
+                                if self.default_version
+                                else {}
+                            ),
+                        },
                         auth=False,
                     ),
                     self._request("GET", "chunithm/alias/list", auth=False),
                 )
                 catalog = {
                     "fetched_at": _now(),
+                    "requested_version": self.default_version,
                     "songs": (songs_data or {}).get("songs", []),
                     "genres": (songs_data or {}).get("genres", []),
                     "versions": (songs_data or {}).get("versions", []),
@@ -1094,14 +1300,24 @@ class ChunithmLxnsPlugin(Star):
                 self._save_json(self.catalog_file, catalog)
                 return catalog
             except UserFacingError:
-                if self.catalog:
+                if force:
+                    raise
+                if (
+                    self.catalog
+                    and self.catalog.get("requested_version") == self.default_version
+                ):
                     return self.catalog
-                if disk_catalog:
+                if (
+                    disk_catalog
+                    and disk_catalog.get("requested_version") == self.default_version
+                ):
                     self.catalog = disk_catalog
                     return disk_catalog
                 raise
 
     def _catalog_expired(self, catalog: dict[str, Any]) -> bool:
+        if catalog.get("requested_version") != self.default_version:
+            return True
         fetched_at = _safe_float(catalog.get("fetched_at")) or 0
         return _now() - fetched_at > self.cache_seconds
 
@@ -1145,7 +1361,13 @@ class ChunithmLxnsPlugin(Star):
             if score is not None:
                 ranked.append((score, song))
 
-        ranked.sort(key=lambda item: (item[0], len(str(item[1].get("title") or "")), item[1].get("id") or 0))
+        ranked.sort(
+            key=lambda item: (
+                item[0],
+                len(str(item[1].get("title") or "")),
+                item[1].get("id") or 0,
+            )
+        )
         return [song for _, song in ranked[:limit]]
 
     async def _resolve_one_song(self, query: str) -> dict[str, Any]:
@@ -1173,12 +1395,16 @@ class ChunithmLxnsPlugin(Star):
             return None
         return int(match.group(1))
 
-    def _song_query_params(self, song: dict[str, Any] | None, fallback_query: str) -> dict[str, Any]:
+    def _song_query_params(
+        self, song: dict[str, Any] | None, fallback_query: str
+    ) -> dict[str, Any]:
         if song and song.get("id") is not None:
             return {"song_id": song.get("id")}
         return {"song_name": fallback_query}
 
-    def _song_display_name(self, song: dict[str, Any] | None, fallback_query: str) -> str:
+    def _song_display_name(
+        self, song: dict[str, Any] | None, fallback_query: str
+    ) -> str:
         if song:
             return f"{song.get('id')} - {song.get('title')}"
         return fallback_query
@@ -1212,7 +1438,9 @@ class ChunithmLxnsPlugin(Star):
                 return count, rest.strip()
         return default, args.strip()
 
-    async def _resolve_friend_code(self, event: AstrMessageEvent, explicit_code: str | None = None) -> str:
+    async def _resolve_friend_code(
+        self, event: AstrMessageEvent, explicit_code: str | None = None
+    ) -> str:
         if explicit_code:
             return _normalize_friend_code(explicit_code)
 
@@ -1230,7 +1458,9 @@ class ChunithmLxnsPlugin(Star):
             except UserFacingError:
                 pass
 
-        raise UserFacingError("未绑定好友码。请先发送 /chu bind <好友码>，或在命令末尾直接写好友码。")
+        raise UserFacingError(
+            "未绑定好友码。请先发送 /chu bind <好友码>，或在命令末尾直接写好友码。"
+        )
 
     def _binding_key(self, event: AstrMessageEvent) -> str:
         platform = event.get_platform_id() or event.get_platform_name() or "default"
@@ -1330,7 +1560,9 @@ class ChunithmLxnsPlugin(Star):
             parts.append(f"游玩 {_format_number(player.get('total_play_count'))}")
         return " / ".join(parts)
 
-    def _format_score_section(self, title: str, scores: list[dict[str, Any]], limit: int) -> list[str]:
+    def _format_score_section(
+        self, title: str, scores: list[dict[str, Any]], limit: int
+    ) -> list[str]:
         if not scores:
             return []
         ratings = [_safe_float(score.get("rating")) for score in scores]
@@ -1356,18 +1588,30 @@ class ChunithmLxnsPlugin(Star):
         include_title: bool = True,
     ) -> str:
         prefix = f"#{idx:02d} " if idx is not None else ""
-        title = _truncate_display(score.get("song_name") or f"ID {score.get('id', '-')}", 52)
-        diff = LEVEL_SHORT.get(score.get("level_index"), str(score.get("level_index", "-")))
+        title = _truncate_display(
+            score.get("song_name") or f"ID {score.get('id', '-')}", 52
+        )
+        diff = LEVEL_SHORT.get(
+            score.get("level_index"), str(score.get("level_index", "-"))
+        )
         level = score.get("level") or "-"
         score_value = _format_number(score.get("score"))
         rating = _format_number(score.get("rating"), 2)
-        rank = RANK_NAMES.get(str(score.get("rank") or "").lower(), str(score.get("rank") or "-").upper())
+        rank = RANK_NAMES.get(
+            str(score.get("rank") or "").lower(), str(score.get("rank") or "-").upper()
+        )
         badges = self._score_badges(score)
-        heading = f"{prefix}{title} [{diff} {level}]" if include_title else f"{prefix}[{diff} {level}]"
+        heading = (
+            f"{prefix}{title} [{diff} {level}]"
+            if include_title
+            else f"{prefix}[{diff} {level}]"
+        )
         detail_parts = [score_value, rank, f"Rating {rating}", *badges]
         lines = [heading, "  " + " / ".join(detail_parts)]
         if include_time:
-            lines.append(f"  时间：{_format_time(score.get('play_time') or score.get('last_played_time'))}")
+            lines.append(
+                f"  时间：{_format_time(score.get('play_time') or score.get('last_played_time'))}"
+            )
         return "\n".join(lines)
 
     def _score_badges(self, score: dict[str, Any]) -> list[str]:
@@ -1413,7 +1657,9 @@ class ChunithmLxnsPlugin(Star):
             lines.append("别名：")
             lines.extend(f"- {_truncate_display(alias, 60)}" for alias in aliases[:12])
             if len(aliases) > 12:
-                lines.append(f"还有 {len(aliases) - 12} 个别名，可用 /chu alias {song.get('id')} 查看。")
+                lines.append(
+                    f"还有 {len(aliases) - 12} 个别名，可用 /chu alias {song.get('id')} 查看。"
+                )
         jacket = self._song_jacket(song)
         lines.append(f"曲绘：{'已保存到本地素材库' if jacket else '本地素材库中暂无'}")
         return "\n".join(lines)
@@ -1421,7 +1667,9 @@ class ChunithmLxnsPlugin(Star):
     def _format_song_levels(self, song: dict[str, Any]) -> str:
         parts = []
         for diff in song.get("difficulties") or []:
-            name = LEVEL_SHORT.get(diff.get("difficulty"), str(diff.get("difficulty", "-")))
+            name = LEVEL_SHORT.get(
+                diff.get("difficulty"), str(diff.get("difficulty", "-"))
+            )
             level = diff.get("level") or "-"
             value = diff.get("level_value")
             if value is not None:
@@ -1448,7 +1696,9 @@ class ChunithmLxnsPlugin(Star):
             extra = f" / {kanji}{star or ''}"
         return f"{name} {level}{value_part}{extra}\n  {' / '.join(details)}"
 
-    def _difficulty_matches_level(self, diff: dict[str, Any], level_filter: str) -> bool:
+    def _difficulty_matches_level(
+        self, diff: dict[str, Any], level_filter: str
+    ) -> bool:
         level_filter = level_filter.strip().lower()
         level = str(diff.get("level") or "").lower()
         value = diff.get("level_value")
