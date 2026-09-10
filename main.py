@@ -29,7 +29,7 @@ from .renderer import (
 )
 
 PLUGIN_NAME = "astrbot_plugin_chunithm_lxns"
-PLUGIN_VERSION = "0.6.0"
+PLUGIN_VERSION = "0.6.1"
 DATA_DIR = Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
 MAX_COMMAND_LENGTH = 512
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -299,7 +299,7 @@ class ChunithmLxnsPlugin(Star):
         self.token = str(self.config.get("lxns_token", "") or "").strip()
         self.default_version = max(0, _safe_int(self.config.get("default_version"), 0))
         self.cache_seconds = max(
-            _safe_int(self.config.get("cache_seconds"), 24 * 60 * 60),
+            _safe_int(self.config.get("cache_seconds"), 60 * 60),
             60,
         )
         self.timeout_seconds = max(_safe_int(self.config.get("timeout_seconds"), 15), 3)
@@ -1173,6 +1173,32 @@ class ChunithmLxnsPlugin(Star):
             for title, rows in section_specs
             if rows
         ]
+        if any(
+            score.get("level_value") is None for _, rows in sections for score in rows
+        ):
+            logger.info(
+                "B30 contains charts without constants; refreshing the catalog."
+            )
+            try:
+                refreshed_catalog = await self._get_catalog(force=True)
+            except UserFacingError as exc:
+                logger.warning(f"Unable to refresh the B30 catalog: {exc}")
+            else:
+                refreshed_songs_by_id = {
+                    _safe_int(song.get("id"), -1): song
+                    for song in refreshed_catalog.get("songs") or []
+                    if song.get("id") is not None
+                }
+                sections = [
+                    (
+                        title,
+                        enrich_scores_with_catalog(
+                            rows, refreshed_songs_by_id, jacket_paths
+                        ),
+                    )
+                    for title, rows in section_specs
+                    if rows
+                ]
         self._validate_rating_sections(sections)
 
         output_path = (

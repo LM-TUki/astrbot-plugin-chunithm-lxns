@@ -43,9 +43,9 @@
   },
   "cache_seconds": {
     "description": "曲库缓存时间（秒）",
-    "hint": "曲库和别名会缓存到 data/plugin_data/astrbot_plugin_chunithm_lxns。",
+    "hint": "曲库和别名会缓存到 data/plugin_data/astrbot_plugin_chunithm_lxns。B30 发现新谱面缺少定数时会自动强制刷新一次。",
     "type": "int",
-    "default": 86400
+    "default": 3600
   },
   "timeout_seconds": {
     "description": "API 请求超时时间（秒）",

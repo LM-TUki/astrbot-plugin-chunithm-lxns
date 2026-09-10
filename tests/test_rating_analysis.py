@@ -105,6 +105,40 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(main_module.UserFacingError):
             await self.plugin._get_catalog()
 
+    async def test_b30_refreshes_catalog_when_a_chart_has_no_constant(self):
+        self.plugin.b30_show_count = 30
+        self.plugin.selection_show_count = 0
+        self.plugin._local_jackets = Mock(return_value={})
+        self.plugin._local_player_assets = Mock(return_value={})
+        self.plugin._validate_rating_sections = Mock()
+        self.plugin._cleanup_generated_images = Mock()
+        self.plugin._get_catalog = AsyncMock(
+            return_value={
+                "songs": [
+                    {
+                        "id": 1,
+                        "title": "Fresh Song",
+                        "difficulties": [
+                            {"difficulty": 3, "level": "14+", "level_value": 14.8}
+                        ],
+                    }
+                ]
+            }
+        )
+        self.plugin.renderer = Mock()
+        self.plugin.renderer.render = Mock()
+        self.plugin.generated_dir = Path(tempfile.gettempdir())
+        self.plugin.render_semaphore = asyncio.Semaphore(1)
+        self.plugin.show_friend_code = False
+        self.plugin.show_play_count = False
+        self.plugin.footer_bot_name = ""
+
+        await self.plugin._render_b30({}, {"bests": [score()]}, {"songs": []})
+
+        self.plugin._get_catalog.assert_awaited_once_with(force=True)
+        rendered_sections = self.plugin.renderer.render.call_args.args[1]
+        self.assertEqual(rendered_sections[0][1][0]["level_value"], 14.8)
+
 
 if __name__ == "__main__":
     unittest.main()
