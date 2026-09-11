@@ -79,6 +79,25 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin._dispatch(event, "/chu stats 888888888888888")
         self.plugin._resolve_friend_code.assert_awaited_with(event, "888888888888888")
 
+    async def test_b30_recalculates_rating_with_empty_new_slots(self):
+        self.plugin.render_b30_image = False
+        self.plugin.show_friend_code = False
+        self.plugin.show_play_count = False
+        self.plugin.b30_show_count = 30
+        self.plugin.selection_show_count = 10
+        self.plugin._api_player = AsyncMock(return_value={"name": "Player", "rating": 16.67})
+        self.plugin._api_rating_bests = AsyncMock(
+            return_value={
+                "bests": [score(index, rating=16.0) for index in range(30)],
+                "new_bests": [score(100 + index, rating=16.0) for index in range(9)],
+            }
+        )
+
+        result = await self.plugin._cmd_b30(object(), "")
+
+        self.assertIn("Rating 12.48", result)
+        self.assertNotIn("Rating 16.67", result)
+
     async def test_auto_catalog_omits_version_and_force_does_not_hide_failure(self):
         self.plugin.default_version = 0
         self.plugin.cache_seconds = 86400

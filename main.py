@@ -29,7 +29,7 @@ from .renderer import (
 )
 
 PLUGIN_NAME = "astrbot_plugin_chunithm_lxns"
-PLUGIN_VERSION = "0.6.2"
+PLUGIN_VERSION = "0.6.3"
 DATA_DIR = Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
 MAX_COMMAND_LENGTH = 512
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -581,6 +581,18 @@ class ChunithmLxnsPlugin(Star):
                 catalog_task.cancel()
                 await asyncio.gather(catalog_task, return_exceptions=True)
             raise
+
+        rating_rows = (
+            list(bests.get("bests") or [])[:30]
+            + list(bests.get("new_bests") or [])[:20]
+        )
+        if rating_rows:
+            rating_total = sum(
+                _safe_float(score.get("rating")) or 0 for score in rating_rows
+            )
+            player = dict(player)
+            player["rating"] = int(rating_total * 2 + 1e-6) / 100
+            player["rating_calculated"] = True
 
         if self.render_b30_image:
             try:

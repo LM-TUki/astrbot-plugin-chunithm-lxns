@@ -543,7 +543,7 @@ class ChunithmBestRenderer:
 
         draw.text(
             (70, 181),
-            "RATING",
+            "RATING / B30 + N20" if player.get("rating_calculated") else "RATING",
             font=self.fonts.font(13, latin=True, weight="black"),
             fill=VIOLET,
         )
