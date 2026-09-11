@@ -148,7 +148,8 @@ class RendererTests(unittest.TestCase):
             )
             for command, _ in section
         }
-        self.assertEqual(len(commands), 15)
+        self.assertEqual(len(commands), 16)
+        self.assertIn("/chu sync", commands)
         self.assertIn("/chu stats [好友码]", commands)
         self.assertIn("/chu targets [好友码]", commands)
         self.assertIn("/chu b30 [好友码]", commands)

@@ -1,6 +1,6 @@
 name: astrbot_plugin_chunithm_lxns
 display_name: 中二节奏落雪查询
 desc: 国服中二节奏 2027 主题，支持 B30 图片、分组统计、冲分目标、Recent、查歌与本地素材。
-version: v0.6.3
+version: v0.6.4
 author: Codex
 repo: "https://github.com/LM-TUki/astrbot-plugin-chunithm-lxns"

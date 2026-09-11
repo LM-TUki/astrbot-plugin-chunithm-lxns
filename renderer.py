@@ -108,6 +108,7 @@ TROPHY_COLORS = {
 HELP_ACCOUNT_COMMANDS = (
     ("/chu bind <好友码>", "绑定自己的玩家账号"),
     ("/chu unbind", "解除当前账号绑定"),
+    ("/chu sync", "同步游戏资料到落雪"),
     ("/chu me [好友码]", "查看玩家资料"),
     ("/chu b30 [好友码]", "生成 Rating 构成图片"),
     ("/chu recent [数量] [好友码]", "查询 Recent 记录"),
@@ -608,6 +609,14 @@ class ChunithmBestRenderer:
             font=self.fonts.font(20, latin=True, weight="black"),
             fill=INK,
         )
+        if player.get("upload_time"):
+            sync_date = str(player["upload_time"]).split("T", 1)[0]
+            draw.text(
+                (580, 232),
+                f"PROFILE {'STALE' if player.get('profile_stale') else 'SYNC'} · {sync_date}",
+                font=self.fonts.font(11, latin=True, weight="black"),
+                fill=(211, 72, 52) if player.get("profile_stale") else MUTED,
+            )
 
         extras = []
         if show_friend_code and player.get("friend_code"):

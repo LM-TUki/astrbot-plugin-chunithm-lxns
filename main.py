@@ -29,7 +29,7 @@ from .renderer import (
 )
 
 PLUGIN_NAME = "astrbot_plugin_chunithm_lxns"
-PLUGIN_VERSION = "0.6.3"
+PLUGIN_VERSION = "0.6.4"
 DATA_DIR = Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
 MAX_COMMAND_LENGTH = 512
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -412,6 +412,15 @@ class ChunithmLxnsPlugin(Star):
             return self._cmd_unbind(event)
         if cmd_key in {"whoami", "me", "我的", "info", "player", "玩家"}:
             return await self._cmd_player(event, args)
+        if cmd_key in {"sync", "同步", "传分"}:
+            return (
+                "落雪玩家资料只能在完成游戏数据同步后更新。\n"
+                "请按落雪官方同步说明操作：\n"
+                "https://maimai.lxns.net/docs/sync\n"
+                "中二节奏同步入口：\n"
+                "https://maimai.lxns.net/api/v0/chunithm/wechat/auth\n"
+                "同步完成后重新发送 /chu b30 或 /chu me。"
+            )
         if cmd_key in {"b30", "best30", "bests", "best"} and not args:
             return await self._cmd_b30(event, args)
         if cmd_key in {"b30", "best30", "bests"}:
@@ -586,6 +595,7 @@ class ChunithmLxnsPlugin(Star):
             list(bests.get("bests") or [])[:30]
             + list(bests.get("new_bests") or [])[:20]
         )
+        profile_warning = ""
         if rating_rows:
             rating_total = sum(
                 _safe_float(score.get("rating")) or 0 for score in rating_rows
@@ -593,17 +603,35 @@ class ChunithmLxnsPlugin(Star):
             player = dict(player)
             player["rating"] = int(rating_total * 2 + 1e-6) / 100
             player["rating_calculated"] = True
+            profile_upload_time = str(player.get("upload_time") or "")
+            score_upload_times = [
+                str(score.get("upload_time"))
+                for score in rating_rows
+                if score.get("upload_time")
+            ]
+            if score_upload_times and (
+                not profile_upload_time or max(score_upload_times) > profile_upload_time
+            ):
+                player["profile_stale"] = True
+                profile_warning = (
+                    "落雪中的玩家资料快照早于最新成绩；名称、等级、称号、段位、"
+                    "OVER POWER 和头像可能仍是旧数据。请发送 /chu sync 查看同步入口。"
+                )
 
         if self.render_b30_image:
             try:
                 assert catalog_task is not None
                 catalog = await catalog_task
-                return await self._render_b30(player, bests, catalog)
+                image = await self._render_b30(player, bests, catalog)
+                if profile_warning:
+                    return BotResponse(text=profile_warning, image=image)
+                return image
             except Exception as exc:
                 logger.error(f"B30 图片生成失败，已回退文本：{exc}")
                 logger.error(traceback.format_exc())
 
-        return self._format_b30_text(player, bests, code)
+        text = self._format_b30_text(player, bests, code)
+        return f"{profile_warning}\n\n{text}" if profile_warning else text
 
     def _format_b30_text(
         self, player: dict[str, Any], bests: dict[str, Any], code: str

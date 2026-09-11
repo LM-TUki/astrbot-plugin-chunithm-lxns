@@ -98,6 +98,35 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Rating 12.48", result)
         self.assertNotIn("Rating 16.67", result)
 
+    async def test_b30_warns_when_profile_snapshot_is_older_than_scores(self):
+        self.plugin.render_b30_image = False
+        self.plugin.show_friend_code = False
+        self.plugin.show_play_count = False
+        self.plugin.b30_show_count = 30
+        self.plugin.selection_show_count = 10
+        self.plugin._api_player = AsyncMock(
+            return_value={
+                "name": "Player",
+                "rating": 16.67,
+                "upload_time": "2026-08-23T05:13:52Z",
+            }
+        )
+        self.plugin._api_rating_bests = AsyncMock(
+            return_value={
+                "bests": [score(1, rating=16.0, upload_time="2026-09-11T15:00:00Z")]
+            }
+        )
+
+        result = await self.plugin._cmd_b30(object(), "")
+
+        self.assertIn("玩家资料快照早于最新成绩", result)
+        self.assertIn("/chu sync", result)
+
+    async def test_sync_command_returns_official_lxns_entry(self):
+        result = await self.plugin._dispatch(object(), "/chu sync")
+        self.assertIn("https://maimai.lxns.net/docs/sync", result)
+        self.assertIn("/api/v0/chunithm/wechat/auth", result)
+
     async def test_auto_catalog_omits_version_and_force_does_not_hide_failure(self):
         self.plugin.default_version = 0
         self.plugin.cache_seconds = 86400
