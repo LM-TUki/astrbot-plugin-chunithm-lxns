@@ -29,7 +29,7 @@ from .renderer import (
 )
 
 PLUGIN_NAME = "astrbot_plugin_chunithm_lxns"
-PLUGIN_VERSION = "0.6.1"
+PLUGIN_VERSION = "0.6.2"
 DATA_DIR = Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
 MAX_COMMAND_LENGTH = 512
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -1129,12 +1129,15 @@ class ChunithmLxnsPlugin(Star):
         catalog: dict[str, Any],
     ) -> Path:
         section_specs = [
-            ("BEST 30", list(bests.get("bests") or [])[: self.b30_show_count]),
             (
-                "SELECTION 10",
+                "BEST 30 · 历代高分",
+                list(bests.get("bests") or [])[: self.b30_show_count],
+            ),
+            (
+                "SELECTION 10 · 历代精选",
                 list(bests.get("selections") or [])[: self.selection_show_count],
             ),
-            ("NEW 20", list(bests.get("new_bests") or [])[:20]),
+            ("NEW 20 · 2027 已游玩", list(bests.get("new_bests") or [])[:20]),
         ]
         if not any(rows for _, rows in section_specs):
             raise UserFacingError("落雪没有返回 Rating 构成数据。")

@@ -693,7 +693,10 @@ class ChunithmBestRenderer:
         self, canvas: Image.Image, y: int, title: str, rows: list[dict[str, Any]]
     ) -> int:
         draw = ImageDraw.Draw(canvas, "RGBA")
-        color = SECTION_STYLES.get(title, (90, 205, 217))
+        section_key = next(
+            (key for key in SECTION_STYLES if title.startswith(key)), title
+        )
+        color = SECTION_STYLES.get(section_key, (90, 205, 217))
         average = sum(_as_float(row.get("rating")) for row in rows) / len(rows)
         section_height = self._section_height(len(rows))
         draw.rectangle(
@@ -704,7 +707,7 @@ class ChunithmBestRenderer:
             (MARGIN, y + 49, WIDTH - MARGIN, y + 49), fill=(212, 207, 226, 255), width=1
         )
         section_number = {"BEST 30": "01", "SELECTION 10": "02", "NEW 20": "03"}.get(
-            title, "--"
+            section_key, "--"
         )
         draw.text(
             (MARGIN, y + 18),
@@ -733,7 +736,10 @@ class ChunithmBestRenderer:
             anchor="lm",
         )
         ratings = [_as_float(row.get("rating")) for row in rows]
-        detail = f"{len(rows):02d} CHARTS   /   RANGE {min(ratings):.2f} — {max(ratings):.2f}"
+        if section_key == "NEW 20":
+            detail = f"{len(rows):02d} PLAYED   /   RANGE {min(ratings):.2f} — {max(ratings):.2f}"
+        else:
+            detail = f"{len(rows):02d} CHARTS   /   RANGE {min(ratings):.2f} — {max(ratings):.2f}"
         draw.text(
             (tab_right + 28, y + 21),
             detail,
